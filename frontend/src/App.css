@@ -1,0 +1,10 @@
+/* frontend/src/App.css */
+:root{font-family:system-ui,sans-serif;color:#172033;background:#f8fafc}*{box-sizing:border-box}
+body{margin:0}button,input,textarea{font:inherit}button{cursor:pointer}
+.shell{max-width:1120px;margin:auto;padding:clamp(16px,4vw,40px)}header p{color:#526174}
+label{display:block;font-weight:600}input,textarea{display:block;width:100%;margin:7px 0 18px;padding:11px;border:1px solid #9aabba;border-radius:8px;background:white;color:inherit}
+textarea{min-height:120px;resize:vertical}.layout{display:grid;grid-template-columns:minmax(260px,1fr) minmax(320px,1.3fr);gap:20px}
+.list,.detail{background:#fff;border:1px solid #d6dee8;border-radius:12px;padding:16px;min-width:0}.row{width:100%;display:grid;text-align:left;gap:5px;padding:13px;margin-bottom:8px;background:#fff;border:1px solid #d6dee8;border-radius:9px}
+.row:hover,.row.active{border-color:#087f9a;background:#ecfeff}.row span{color:#526174;font-size:.9rem}.detail dl{display:grid;grid-template-columns:1fr 1fr;gap:7px}.detail dt{color:#526174}.detail dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.detail button{background:#0e7490;color:white;border:0;border-radius:8px;padding:10px 16px}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #f59e0b;outline-offset:2px}
+@media(max-width:740px){.layout{grid-template-columns:1fr}.shell{padding:16px}}
