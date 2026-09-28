@@ -1,5 +1,6 @@
 # backend/tradebook/api.py
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,10 +30,12 @@ def create_app(db_path: str | Path) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/api/trades")
-    def trades(offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100)):
+    def trades(offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100),
+               recent: bool = False):
         db = database()
         try:
-            rows = list_trades(db, limit + 1, offset)
+            since = datetime.now(timezone.utc) - timedelta(days=30) if recent else None
+            rows = list_trades(db, limit + 1, offset, since=since)
             return {"items": [public(r) for r in rows[:limit]], "has_more": len(rows) > limit}
         finally:
             db.close()

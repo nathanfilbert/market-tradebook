@@ -45,3 +45,54 @@ def test_short_entry_reduction_is_supported():
     assert len(result.closes) == 1
     assert result.closes[0].position_side == "short"
     assert result.closes[0].closed_quantity == Decimal("1")
+
+
+def test_multiple_cfm_entry_fills_emit_close_with_unknown_entry_basis():
+    result = assemble_closes([
+        fill("entry-one", "BUY", "1", "100", "2026-01-01T00:00:00Z"),
+        fill("entry-two", "BUY", "2", "101", "2026-01-01T01:00:00Z"),
+        fill("close-one", "SELL", "1", "102", "2026-01-02T00:00:00Z"),
+        fill("close-two", "SELL", "2", "103", "2026-01-03T00:00:00Z"),
+    ], product=future("EXPIRING"), source_key="coinbase.cfm.dated_future", account_id="cfm")
+    assert result.unresolved == ()
+    assert [p.closed_quantity for p in result.closes] == [Decimal("1"), Decimal("2")]
+    assert all(p.entry_price is None and p.entry_time is None and p.fee_usd is None for p in result.closes)
+    assert all(p.position_side == "long" and p.contract_multiplier is None for p in result.closes)
+    assert [e.event_id for e in result.closes[0].source_events] == ["entry-one", "entry-two", "close-one"]
+
+
+def test_multi_entry_cfm_close_replays_with_immutable_source_events(tmp_path):
+    from tradebook.store import connect, initialize, upsert_packet
+    result = assemble_closes([
+        fill("entry-one", "SELL", "1", "100", "2026-01-01T00:00:00Z"),
+        fill("entry-two", "SELL", "1", "101", "2026-01-01T01:00:00Z"),
+        fill("exit-one", "BUY", "1", "99", "2026-01-02T00:00:00Z"),
+        fill("exit-two", "BUY", "1", "98", "2026-01-03T00:00:00Z"),
+    ], product=future("EXPIRING"), source_key="coinbase.cfm.dated_future", account_id="cfm")
+    assert result.unresolved == () and len(result.closes) == 2
+    assert all(p.position_side == "short" and p.entry_price is None for p in result.closes)
+    db = connect(tmp_path / "derivative.sqlite3"); initialize(db)
+    for packet in (*result.closes, *result.closes):
+        upsert_packet(db, packet)
+    assert db.execute("SELECT count(*) FROM trades").fetchone()[0] == 2
+    assert all(row[0] is None for row in db.execute("SELECT gross_pnl_usd FROM trades"))
+
+
+def test_duplicate_derivative_fill_id_refuses_all_close_packets():
+    result = assemble_closes([
+        fill("a", "BUY", "1", "100", "2026-01-01T00:00:00Z"),
+        fill("b", "BUY", "1", "101", "2026-01-01T01:00:00Z"),
+        fill("x", "SELL", "1", "102", "2026-01-02T00:00:00Z"),
+        fill("x", "SELL", "1", "103", "2026-01-03T00:00:00Z"),
+    ], product=future("EXPIRING"), source_key="coinbase.cfm.dated_future", account_id="cfm")
+    assert result.closes == ()
+    assert any("duplicate" in reason for reason in result.unresolved)
+
+
+def test_multi_entry_reversal_does_not_drop_the_new_side():
+    result = assemble_closes([
+        fill("a", "BUY", "1", "100", "2026-01-01T00:00:00Z"),
+        fill("b", "BUY", "1", "101", "2026-01-01T01:00:00Z"),
+        fill("reverse", "SELL", "3", "102", "2026-01-02T00:00:00Z"),
+    ], product=future("EXPIRING"), source_key="coinbase.cfm.dated_future", account_id="cfm")
+    assert result.unresolved and result.closes == ()

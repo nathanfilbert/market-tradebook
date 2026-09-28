@@ -50,3 +50,26 @@ def test_public_trade_does_not_expose_raw_packet_or_account_payload(tmp_path):
         assert "packet_json" not in value
         assert "packet_hash" not in value
     assert "source_events" not in client.get(f"/api/trades/{trade_id}").text
+
+
+def test_recent_trades_filter_excludes_older_closes_without_deleting_them(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "recent.sqlite3"
+    db = connect(path); initialize(db)
+    older = packet(entry_time=(now - timedelta(days=32)).isoformat(),
+                   close_time=(now - timedelta(days=31)).isoformat())
+    older["source_events"][0]["occurred_at"] = older["entry_time"]
+    older["source_events"][1]["occurred_at"] = older["close_time"]
+    older_id = upsert_packet(db, ClosedTradePacket.model_validate(older))
+    current = packet(close_id="recent-close", close_time=(now - timedelta(days=1)).isoformat())
+    current["source_events"][0]["event_id"] = "recent-entry"
+    current["source_events"][1]["event_id"] = "recent-exit"
+    current["source_events"][1]["occurred_at"] = current["close_time"]
+    recent_id = upsert_packet(db, ClosedTradePacket.model_validate(current)); db.close()
+    client = TestClient(create_app(path))
+    response = client.get("/api/trades?recent=true").json()
+    assert [item["id"] for item in response["items"]] == [recent_id]
+    assert response["has_more"] is False
+    assert len(client.get("/api/trades").json()["items"]) == 2
+    assert client.get(f"/api/trades/{older_id}").status_code == 200

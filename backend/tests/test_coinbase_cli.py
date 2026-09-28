@@ -213,3 +213,54 @@ def test_verified_cfm_dated_close_can_be_captured_without_invented_economics(tmp
     with connect(path) as db:
         row = db.execute("SELECT gross_pnl_usd, net_pnl_usd, position_notional_usd FROM trades").fetchone()
         assert row is not None and tuple(row) == (None, None, None)
+
+
+def test_cfm_multi_entry_close_requires_position_history_before_persistence(tmp_path, monkeypatch):
+    from tradebook import coinbase_auth, sync
+    from tradebook.domain import ClosedTradePacket
+    from test_domain import packet
+    monkeypatch.setattr(coinbase_auth, "load_coinbase_env", lambda: None)
+    monkeypatch.setenv("COINBASE_API_KEY_NAME", "synthetic")
+    monkeypatch.setenv("COINBASE_API_KEY_SECRET", "synthetic")
+    trade = ClosedTradePacket.model_validate(packet(source_key="coinbase.cfm.dated_future",
+                                                     account_id="portfolio", product_type="dated_future",
+                                                     entry_time=None, entry_price=None,
+                                                     contract_multiplier=None, fee_usd=None, funding_usd=None))
+    class Source:
+        source_key = "coinbase.cfm.dated_future"
+        account_id = "portfolio"
+        def iter_closes(self): return iter((trade,))
+    monkeypatch.setattr(sync, "_live_source", lambda args: (Source(), [trade]))
+    path = tmp_path / "ambiguous.sqlite3"
+    assert sync.main(["--source", "coinbase-cfm-dated-future", "--product-id", "EXAMPLE",
+                      "--portfolio-id", "portfolio", "--db", str(path),
+                      "--confirm-live-read", "--confirm-local-import"]) == 2
+    assert not path.exists()
+
+
+def test_cfm_unknown_entry_stages_raw_fills_without_trade_rows_when_explicit(tmp_path, monkeypatch):
+    from tradebook import coinbase_auth, sync
+    from tradebook.domain import ClosedTradePacket
+    from tradebook.store import connect
+    from test_domain import packet
+    monkeypatch.setattr(coinbase_auth, "load_coinbase_env", lambda: None)
+    monkeypatch.setenv("COINBASE_API_KEY_NAME", "synthetic")
+    monkeypatch.setenv("COINBASE_API_KEY_SECRET", "synthetic")
+    trade = ClosedTradePacket.model_validate(packet(source_key="coinbase.cfm.dated_future",
+                                                     account_id="portfolio", product_type="dated_future",
+                                                     entry_time=None, entry_price=None, contract_multiplier=None))
+    class Source:
+        source_key = "coinbase.cfm.dated_future"
+        account_id = "portfolio"
+        _fills = ({"entry_id": "fill-1", "product_id": "EXAMPLE", "trade_type": "FILL"},)
+        def iter_closes(self): return iter((trade,))
+    monkeypatch.setattr(sync, "_live_source", lambda args: (Source(), [trade]))
+    path = tmp_path / "pending.sqlite3"
+    args = ["--source", "coinbase-cfm-dated-future", "--product-id", "EXAMPLE",
+            "--portfolio-id", "portfolio", "--db", str(path), "--confirm-live-read",
+            "--confirm-local-import", "--stage-unresolved-events"]
+    assert sync.main(args) == 0
+    assert sync.main(args) == 0
+    with connect(path) as db:
+        assert db.execute("SELECT count(*) FROM trades").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM source_events").fetchone()[0] == 1

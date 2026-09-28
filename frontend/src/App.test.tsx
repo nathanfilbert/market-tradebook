@@ -19,6 +19,7 @@ it('shows sourced columns and saves only reason', async () => {
   vi.spyOn(api, 'saveReason').mockResolvedValue({ ...trade, reason: 'Breakout', reason_revision: 1 })
   render(<App />)
   expect((await screen.findAllByText('BTC-USD')).length).toBeGreaterThan(0)
+  expect(api.fetchTrades).toHaveBeenCalledWith(0, true)
   expect(screen.getByText('$6,000.00')).toBeTruthy()
   fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'Breakout' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save reason' }))
@@ -29,7 +30,7 @@ it('shows sourced columns and saves only reason', async () => {
 it('shows an empty state', async () => {
   vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [], has_more: false })
   render(<App />)
-  expect(await screen.findByText('No captured trades yet.')).toBeTruthy()
+  expect(await screen.findByText('No captured trades in this view.')).toBeTruthy()
 })
 
 it('labels unknown cross-currency basis without inventing profit', async () => {
@@ -50,7 +51,21 @@ it('loads older history rather than silently hiding it', async () => {
   await screen.findByText('Load more trades')
   fireEvent.click(screen.getByText('Load more trades'))
   expect(await screen.findByText('ETH-USD')).toBeTruthy()
-  expect(api.fetchTrades).toHaveBeenLastCalledWith(1)
+  expect(api.fetchTrades).toHaveBeenLastCalledWith(1, true)
+})
+
+it('defaults to the last 30 days and can show all saved history', async () => {
+  const older = { ...trade, id: 'old', market: 'ETH-USD' }
+  vi.spyOn(api, 'fetchTrades')
+    .mockResolvedValueOnce({ items: [trade], has_more: false })
+    .mockResolvedValueOnce({ items: [trade, older], has_more: false })
+  render(<App />)
+  await screen.findAllByText('BTC-USD')
+  expect(screen.queryByText('ETH-USD')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Show all history' }))
+  expect(await screen.findByText('ETH-USD')).toBeTruthy()
+  expect(api.fetchTrades).toHaveBeenLastCalledWith(0, false)
+  expect(screen.getByRole('button', { name: 'Show last 30 days' })).toBeTruthy()
 })
 
 it('ignores overlapping load-more clicks and duplicate returned rows', async () => {

@@ -11,6 +11,8 @@ export default function App() {
   const selectedRef = useRef<string | null>(null)
   const [reason, setReason] = useState('')
   const [query, setQuery] = useState('')
+  const [recentOnly, setRecentOnly] = useState(true)
+  const generation = useRef(0)
   const [hasMore, setHasMore] = useState(false)
   const loadingMore = useRef(false)
   const [loadingMoreView, setLoadingMoreView] = useState(false)
@@ -20,28 +22,42 @@ export default function App() {
   const active = trades.find(t => t.id === selected)
   const visible = useMemo(() => trades.filter(t =>
     `${t.market} ${t.product_type} ${t.source_key}`.toLowerCase().includes(query.toLowerCase())), [trades, query])
-  useEffect(() => { fetchTrades().then(page => {
-    setTrades(page.items); setHasMore(page.has_more)
-    offset.current = page.items.length
-    selectedRef.current = page.items[0]?.id ?? null
-    setSelected(selectedRef.current); setReason(page.items[0]?.reason ?? '')
-    setStatus(page.items.length ? '' : 'No captured trades yet.')
-  }).catch(() => setStatus('Could not load trades.')) }, [])
+  useEffect(() => {
+    let cancelled = false
+    fetchTrades(0, recentOnly).then(page => {
+      if (cancelled) return
+      setTrades(page.items); setHasMore(page.has_more)
+      offset.current = page.items.length
+      selectedRef.current = page.items[0]?.id ?? null
+      setSelected(selectedRef.current); setReason(page.items[0]?.reason ?? '')
+      setStatus(page.items.length ? '' : 'No captured trades in this view.')
+    }).catch(() => { if (!cancelled) setStatus('Could not load trades.') })
+    return () => { cancelled = true }
+  }, [recentOnly])
+  function changeWindow() {
+    generation.current += 1
+    loadingMore.current = false; setLoadingMoreView(false)
+    setTrades([]); setHasMore(false); setSelected(null); selectedRef.current = null
+    setReason(''); offset.current = 0; setStatus('Loading trades…')
+    setRecentOnly(value => !value)
+  }
   async function more() {
     if (loadingMore.current) return
+    const requestGeneration = generation.current
     loadingMore.current = true
     setLoadingMoreView(true)
     setStatus('Loading more…')
     try {
-      const page = await fetchTrades(offset.current)
+      const page = await fetchTrades(offset.current, recentOnly)
+      if (requestGeneration !== generation.current) return
       offset.current += page.items.length
       setTrades(items => {
         const known = new Set(items.map(item => item.id))
         return [...items, ...page.items.filter(item => !known.has(item.id))]
       })
       setHasMore(page.has_more); setStatus('')
-    } catch { setStatus('Could not load more trades.') }
-    finally { loadingMore.current = false; setLoadingMoreView(false) }
+    } catch { if (requestGeneration === generation.current) setStatus('Could not load more trades.') }
+    finally { if (requestGeneration === generation.current) { loadingMore.current = false; setLoadingMoreView(false) } }
   }
   function choose(t: Trade) { selectedRef.current = t.id; setSelected(t.id); setReason(t.reason ?? ''); setStatus('') }
   async function submit() {
@@ -61,6 +77,8 @@ export default function App() {
   }
   return <main className="shell">
     <header><h1>Market Tradebook</h1><p>Read-only trade data · reasons are yours to add</p></header>
+    <p>Showing {recentOnly ? 'the last 30 days' : 'all saved history'} · <button onClick={changeWindow}>
+      {recentOnly ? 'Show all history' : 'Show last 30 days'}</button></p>
     <label>Filter trades<input value={query} onChange={e => setQuery(e.target.value)} placeholder="Market, type or source" /></label>
     {status && <p role="status">{status}</p>}
     <div className="layout"><section aria-label="Captured trades" className="list">

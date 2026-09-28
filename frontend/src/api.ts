@@ -18,7 +18,8 @@ async function json<T>(url: string, options?: RequestInit): Promise<T> {
   if (!response.ok) throw new Error(`Request failed (${response.status})`)
   return response.json() as Promise<T>
 }
-export const fetchTrades = (offset = 0) => json<TradePage>(`/api/trades?offset=${offset}&limit=100`)
+export const fetchTrades = (offset = 0, recentOnly = true) =>
+  json<TradePage>(`/api/trades?offset=${offset}&limit=100&recent=${recentOnly}`)
 export const saveReason = (id: string, reason: string | null, revision: number) =>
   json<Trade>(`/api/trades/${encodeURIComponent(id)}/reason`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' },

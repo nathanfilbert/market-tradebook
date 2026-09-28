@@ -57,7 +57,12 @@ def assemble_closes(fills, *, product: ProductSpecification, source_key: str, ac
     closes: list[ClosedTradePacket] = []
     unresolved: list[str] = []
     lots: list[dict] = []
-    for fill in sorted(fills, key=_fill_order):
+    unknown_episode: list[SourceEvent] = []
+    ordered = sorted(fills, key=_fill_order)
+    ids = [fill.get("entry_id") for fill in ordered if isinstance(fill, dict)]
+    if len(ids) != len(set(ids)):
+        return CloseAssembly((), ("duplicate source fill ID",))
+    for fill in ordered:
         try:
             if not isinstance(fill, dict):
                 raise ValueError("invalid source event")
@@ -91,6 +96,36 @@ def assemble_closes(fills, *, product: ProductSpecification, source_key: str, ac
                     lots.append({"id": entry_id, "side": side, "qty": qty, "original_qty": qty,
                                  "price": price, "time": when, "fee": fill.get("fee"),
                                  "fee_currency": fill.get("fee_currency"), "payload": dict(fill), "fee_allocated": Decimal(0)})
+                    if unknown_episode:
+                        unknown_episode.append(SourceEvent(event_id=entry_id, occurred_at=when, payload=dict(fill)))
+                continue
+            if product.product_type != "spot" and (len(matches) > 1 or unknown_episode):
+                if len(matches) != len(lots) or not matches or qty > sum(lot["qty"] for lot in matches):
+                    unresolved.append(f"{entry_id}: ambiguous derivative position or reversal")
+                    continue
+                if not unknown_episode:
+                    unknown_episode = [SourceEvent(event_id=lot["id"], occurred_at=lot["time"],
+                                                   payload=lot["payload"]) for lot in lots]
+                events = [*unknown_episode, SourceEvent(event_id=entry_id, occurred_at=when, payload=dict(fill))]
+                stable_id = str(uuid5(NAMESPACE_URL, f"{source_key}:{account_id}:{product.product_id}:close:{entry_id}"))
+                closes.append(ClosedTradePacket(source_key=source_key, account_id=account_id,
+                    close_id=stable_id, position_id=None, product_type=product.product_type,
+                    market=product.product_id, position_side="long" if matches[0]["side"] == "BUY" else "short",
+                    entry_time=None, close_time=when, closed_quantity=qty, quantity_unit=unit,
+                    entry_price=None, exit_price=price, contract_multiplier=product.contract_multiplier,
+                    price_currency=product.quote_currency, fee_usd=None, funding_usd=None,
+                    source_events=events))
+                remaining = qty
+                for lot in list(matches):
+                    used = min(lot["qty"], remaining)
+                    lot["qty"] -= used
+                    remaining -= used
+                    if lot["qty"] == 0:
+                        lots.remove(lot)
+                    if remaining == 0:
+                        break
+                if not lots:
+                    unknown_episode = []
                 continue
             if product.product_type == "spot" and side == "SELL" and matches:
                 allocations = []

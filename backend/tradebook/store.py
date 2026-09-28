@@ -106,9 +106,12 @@ def get_trade(db: sqlite3.Connection, trade_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-def list_trades(db: sqlite3.Connection, limit: int = 100, offset: int = 0) -> list[dict]:
+def list_trades(db: sqlite3.Connection, limit: int = 100, offset: int = 0,
+                since: datetime | None = None) -> list[dict]:
+    where = "WHERE close_time >= ?" if since is not None else ""
+    parameters = (since.isoformat(), limit, offset) if since is not None else (limit, offset)
     return [dict(r) for r in db.execute(
-        "SELECT * FROM trades ORDER BY close_time DESC, id DESC LIMIT ? OFFSET ?", (limit, offset))]
+        f"SELECT * FROM trades {where} ORDER BY close_time DESC, id DESC LIMIT ? OFFSET ?", parameters)]
 
 def canonical_json(value: dict) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
