@@ -9,3 +9,5 @@ frontend/dist/
 *.sqlite3-shm
 AGENTS.md
 .hermes/
+.env
+**/.env

@@ -75,6 +75,10 @@ export default function App() {
         <dt>Source</dt><dd>{active.source_key}</dd><dt>Type</dt><dd>{active.product_type}</dd>
         <dt>Position</dt><dd>{active.position_side} {active.closed_quantity} {active.quantity_unit}</dd>
         <dt>Entry USD notional</dt><dd>{money(active.position_notional_usd)}</dd>
+        <dt>Entry basis</dt><dd>{active.basis_status === 'cross_currency_unavailable'
+          ? `Cross-currency basis unavailable (${active.basis_currency ?? 'unknown currency'})`
+          : active.basis_status === 'unknown_transfer_basis' ? 'Transfer acquisition basis unavailable'
+          : active.basis_status === 'known_quote_basis' ? `Source-priced in ${active.basis_currency ?? 'quote currency'}` : '—'}</dd>
         <dt>Valued at entry</dt><dd>{active.entry_time ? new Date(active.entry_time).toLocaleString() : '—'}</dd>
         <dt>Gross P/L</dt><dd>{money(active.gross_pnl_usd)}</dd><dt>Fees</dt><dd>{money(active.fee_usd)}</dd>
         <dt>Funding</dt><dd>{money(active.funding_usd)}</dd><dt>Net P/L</dt><dd>{money(active.net_pnl_usd)}</dd>

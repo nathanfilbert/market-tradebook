@@ -32,6 +32,16 @@ it('shows an empty state', async () => {
   expect(await screen.findByText('No captured trades yet.')).toBeTruthy()
 })
 
+it('labels unknown cross-currency basis without inventing profit', async () => {
+  vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [{ ...trade,
+    basis_status: 'cross_currency_unavailable', basis_currency: 'USDC',
+    position_notional_usd: null, gross_pnl_usd: null, net_pnl_usd: null }], has_more: false })
+  render(<App />)
+  await screen.findAllByText('BTC-USD')
+  expect(screen.getByText(/Cross-currency basis unavailable/)).toBeTruthy()
+  expect(screen.getByText(/USDC/)).toBeTruthy()
+})
+
 it('loads older history rather than silently hiding it', async () => {
   vi.spyOn(api, 'fetchTrades')
     .mockResolvedValueOnce({ items: [trade], has_more: true })

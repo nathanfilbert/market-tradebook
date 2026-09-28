@@ -1,10 +1,10 @@
 # Market Tradebook
 
-Local, single-user trade capture and review. **No Coinbase connection or order execution exists yet.** The included mock source contains fictional spot, perpetual, and dated-futures close records so the downstream ledger and UI can be exercised. Only the `reason` is manually editable; all other fields originate with a source packet or a traceable calculation.
+Local, single-user trade capture and review. **Read-only Coinbase access has been verified; local source-backed import requires explicit confirmation into a separate database.** The Spot importer reconciles asset-wide fill and wallet histories before building source-backed FIFO close allocations; it does not establish USD basis for transfers or USDC buys. CFM dated-futures imports are limited to unambiguous fill reductions and leave unverified contract economics, fees and P/L unavailable. The included mock source contains fictional spot, perpetual, and dated-futures close records so the downstream ledger and UI can be exercised. Only the `reason` is manually editable; all other fields originate with a source packet or a traceable calculation. See [the Coinbase source contract](docs/coinbase-source-contract.md) for public field mapping, account-specific unknowns, and fail-closed limits.
 
 ## Scope and data semantics
 
-- One visible row represents a realized close or partial close. The source supplies a stable close ID, closed quantity, allocated entry/exit prices and costs, and underlying source events. Real Coinbase adapters, source matching and cash-flow allocation are future work; the mock does not assert any Coinbase API shape.
+- One visible row represents a realized close or partial close. The source supplies a stable close ID, closed quantity, allocated entry/exit prices and known costs, and underlying source events. Spot exits allocate source-backed buy fills FIFO by execution time (a logging convention, not a tax-lot election); unknown fees/funding stay null. Derivative matching and cash-flow attribution remain conservative. The mock does not assert any Coinbase API shape.
 - USD entry notional is the exposure of the **closed allocation**: quantity × entry price × contract multiplier. It is not margin. Original price, quantity, multiplier, timestamps, account/source IDs, and source event payloads remain in SQLite.
 - Calculated gross and net are separate from any source-reported values; the detail view labels reconciliation as matched, mismatched, not comparable, or unavailable. Net is unknown unless USD-quoted entry/exit prices, multiplier, fee, and funding allocations are all known. Zero cost is explicit zero, not a missing value. Non-USD quoted markets and spot shorts are not calculated in this initial slice; no currency conversion or borrowing economics are guessed.
 - Source events are keyed by `(source_key, account_id, event_id)` and cannot silently change on replay. Sync preserves the manually entered reason and its revision history.
@@ -58,6 +58,21 @@ curl -fsS http://127.0.0.1:8017/api/trades
 
 The mock sync prints `synced 4 fictional close packets`. The first page has four records and `has_more: false`. Tests also check partial-close event deduplication, reason-only editing, and backup restoration. The built frontend is generated at `frontend/dist/` but is not served by FastAPI; local operation uses the two processes above.
 
+## Coinbase read-only preflight (not live import)
+
+After configuring a **view-only** CDP key in the ignored, owner-readable project `.env` as `COINBASE_API_KEY_NAME` and `COINBASE_API_KEY_SECRET`, and selecting a verified canonical product and portfolio ID, an explicitly authorized dry-run can be invoked from `backend/`. The direct API signer uses the CDP SDK and accepts Ed25519; the older Advanced Trade SDK does not.
+
+```bash
+.venv/bin/python -m tradebook.sync --source coinbase-spot \
+  --product-id "$COINBASE_PRODUCT_ID" --portfolio-id "$COINBASE_PORTFOLIO_ID" \
+  --db "$HOME/.local/share/market-tradebook/trades.sqlite3" \
+  --max-fills 1000 --confirm-live-read --dry-run
+```
+
+Select `coinbase-cfm-perpetual` or `coinbase-cfm-dated-future` only after product metadata verifies `MANAGED_BY_FCM`; do not substitute INTX identifiers. The command uses allowlisted GET requests and does **not** write a database on dry-run. For a separately reviewed **Spot or unambiguous CFM dated-future** local capture, use a database path distinct from the default mock database and add `--confirm-local-import` while omitting `--dry-run`. The CLI backs up an existing target, refuses mock data in it, and stores source events plus close allocations atomically. It does not turn unknown fees, funding, multiplier or basis into P/L. Review the dry-run first; complex CFM histories fail closed, and no US CFM perpetual fills were found in the bounded account history. Never place credentials in command arguments, chat or committed files.
+
+The reviewed BTC Spot and two unambiguous CFM dated-future imports are stored in `~/.local/share/market-tradebook/coinbase.sqlite3`, separate from the fictional demo. To review it in the local UI, set `TRADEBOOK_DB` to that path **only for the backend server process**, then launch the frontend as above. Do not run `--mock` against this database. This is a capture ledger, not tax accounting or validated trading performance; unknown-basis/economics rows show unavailable P/L.
+
 ## Backup and restore
 
 Use SQLite's online backup API, not a file copy of a database that might be in use:
@@ -78,4 +93,4 @@ To inspect a backup without touching the original database, set `TRADEBOOK_DB` t
 
 ## Boundaries
 
-No API credentials, live sync scheduler, hosted deployment, multi-user access, trade placement, tax accounting, or automatic reason generation are included. Exact Coinbase product coverage, lot matching, currency conversion and fee/funding allocation need separate design and verification before live data is imported. See `docs/field-contract.md` and `docs/architecture.html` for the design record.
+No credentials are bundled, and there is no live sync scheduler, hosted deployment, multi-user access, trade placement, tax accounting, or automatic reason generation. Coinbase dry-run requires a separately configured read-only CDP key, explicit product/portfolio IDs and `--confirm-live-read`; it reads Coinbase but writes no trade records. Actual product coverage, lot matching, currency conversion and fee/funding allocation require account-specific verification before live writes can be enabled. See `docs/field-contract.md` and `docs/architecture.html` for the design record.

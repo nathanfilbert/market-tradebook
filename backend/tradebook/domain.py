@@ -46,6 +46,8 @@ class ClosedTradePacket(StrictModel):
     funding_usd: Decimal | None = None
     reported_gross_usd: Decimal | None = None
     reported_net_usd: Decimal | None = None
+    basis_status: Literal["known_quote_basis", "unknown_transfer_basis", "cross_currency_unavailable"] | None = None
+    basis_currency: str | None = None
     source_events: list[SourceEvent] = Field(min_length=1)
 
     @field_validator("entry_time", "close_time")

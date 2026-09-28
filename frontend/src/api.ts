@@ -7,6 +7,8 @@ export type Trade = {
   gross_pnl_usd: string | null; fee_usd: string | null; funding_usd: string | null;
   net_pnl_usd: string | null; reported_gross_usd: string | null;
   reported_net_usd: string | null; reconciliation_status: string;
+  basis_status?: 'known_quote_basis' | 'unknown_transfer_basis' | 'cross_currency_unavailable' | null;
+  basis_currency?: string | null;
   reason: string | null; reason_revision: number;
 }
 export type TradePage = { items: Trade[]; has_more: boolean }

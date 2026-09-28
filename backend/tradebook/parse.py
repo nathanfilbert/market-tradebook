@@ -35,4 +35,5 @@ def project(p: ClosedTradePacket) -> dict:
         gross_pnl_usd=text(gross), fee_usd=text(p.fee_usd),
         funding_usd=text(p.funding_usd), net_pnl_usd=text(net),
         reported_gross_usd=text(p.reported_gross_usd),
-        reported_net_usd=text(p.reported_net_usd), reconciliation_status=reconciliation)
+        reported_net_usd=text(p.reported_net_usd), reconciliation_status=reconciliation,
+        basis_status=p.basis_status, basis_currency=p.basis_currency)
