@@ -33,7 +33,7 @@ thead th:first-child{z-index:3;background:#f4f7fb}tbody tr:hover td:first-child{
 .detail h2{margin:0;font-size:23px;letter-spacing:-.03em;overflow-wrap:anywhere}.close-button{border:1px solid #d6e0ea;background:#fff;color:#53677a;border-radius:7px;font-size:24px;line-height:1;width:34px;height:34px}
 .detail dl{display:grid;grid-template-columns:minmax(100px,1fr) minmax(120px,1.2fr);gap:12px 8px;margin:24px 0;border-bottom:1px solid #e6ebf0;padding-bottom:24px;font-size:13px}
 .detail dt{color:#65758a}.detail dd{margin:0;text-align:right;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.detail label{display:block;font-size:13px;font-weight:700;color:#283a51}.detail textarea{min-height:110px;resize:vertical;line-height:1.5}
+.detail label{display:block;font-size:13px;font-weight:700;color:#283a51}.detail textarea{min-height:110px;resize:vertical;line-height:1.5;font-weight:400}
 .primary-button{background:#1a63b3;color:#fff;border:0;border-radius:7px;padding:10px 16px;margin-top:12px;font-size:13px;font-weight:700}
 .detail-status{font-size:13px;color:#246e57;margin:12px 0 0}
 .primary-button:disabled{opacity:.6}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #de9c30;outline-offset:2px}
