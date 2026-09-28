@@ -106,7 +106,7 @@ export default function App() {
         <th scope="col" className="numeric">Exposure</th><th scope="col" className="numeric">Entry</th>
         <th scope="col" className="numeric">Exit</th><th scope="col" className="numeric">Gross P/L</th>
         <th scope="col" className="numeric">Fees</th><th scope="col" className="numeric">Net P/L</th>
-        <th scope="col">Reason</th></tr></thead><tbody>
+        <th scope="col">Entry reason</th></tr></thead><tbody>
       {visible.map(t => <tr key={t.id} className={t.id === selected ? 'selected' : ''} onClick={() => choose(t)}>
         <td><button id={`trade-${t.id}`} className="market-button" onClick={() => choose(t)} aria-label={`Open details for ${t.market}`}>{t.market}</button></td>
         <td className="date-cell">{new Date(t.close_time).toLocaleDateString()}</td>
@@ -148,7 +148,7 @@ export default function App() {
         <dt>Source-reported gross</dt><dd>{money(active.reported_gross_usd)}</dd>
         <dt>Source-reported net</dt><dd>{money(active.reported_net_usd)}</dd>
         <dt>Reconciliation</dt><dd>{active.reconciliation_status.replaceAll('_', ' ')}</dd>
-      </dl><label>Reason<textarea value={reason} onChange={e => setReason(e.target.value)} maxLength={4000} /></label>
+      </dl><label>Entry reason<textarea value={reason} onChange={e => setReason(e.target.value)} maxLength={4000} /></label>
       <button className="primary-button" onClick={submit} disabled={saving}>Save reason</button>
       {reasonStatus && <p role="status" className="detail-status">{status}</p>}
     </aside>}
