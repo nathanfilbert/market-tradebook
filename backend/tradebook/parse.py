@@ -33,6 +33,7 @@ def project(p: ClosedTradePacket) -> dict:
         exit_price=text(p.exit_price), contract_multiplier=text(p.contract_multiplier),
         price_currency=p.price_currency, position_notional_usd=text(notional),
         gross_pnl_usd=text(gross), fee_usd=text(p.fee_usd),
+        fee_currency_assumed=int(p.fee_currency_assumed),
         funding_usd=text(p.funding_usd), net_pnl_usd=text(net),
         reported_gross_usd=text(p.reported_gross_usd),
         reported_net_usd=text(p.reported_net_usd), reconciliation_status=reconciliation,

@@ -10,7 +10,7 @@ from .parse import project
 COLUMNS = ("id", "source_key", "account_id", "close_id", "position_id", "product_type", "market",
     "position_side", "entry_time", "close_time", "closed_quantity", "quantity_unit", "entry_price",
     "exit_price", "contract_multiplier", "price_currency", "position_notional_usd",
-    "gross_pnl_usd", "fee_usd", "funding_usd", "net_pnl_usd", "reported_gross_usd",
+    "gross_pnl_usd", "fee_usd", "fee_currency_assumed", "funding_usd", "net_pnl_usd", "reported_gross_usd",
     "reported_net_usd", "reconciliation_status", "basis_status", "basis_currency")
 
 
@@ -42,6 +42,7 @@ def initialize(db: sqlite3.Connection) -> None:
           entry_price TEXT, exit_price TEXT,
           contract_multiplier TEXT, price_currency TEXT NOT NULL,
           position_notional_usd TEXT, gross_pnl_usd TEXT, fee_usd TEXT,
+          fee_currency_assumed INTEGER NOT NULL DEFAULT 0,
           funding_usd TEXT, net_pnl_usd TEXT, reported_gross_usd TEXT,
           reported_net_usd TEXT, reconciliation_status TEXT NOT NULL,
           basis_status TEXT, basis_currency TEXT,
@@ -52,11 +53,17 @@ def initialize(db: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS reason_history (
           trade_id TEXT NOT NULL REFERENCES trades(id), revision INTEGER NOT NULL,
           reason TEXT, edited_at TEXT NOT NULL, PRIMARY KEY(trade_id, revision));
+        CREATE TABLE IF NOT EXISTS execution_economics (
+          trade_id TEXT PRIMARY KEY REFERENCES trades(id),
+          gross_execution_usd TEXT NOT NULL, net_after_fees_usd TEXT NOT NULL,
+          entry_notional_usd TEXT NOT NULL, pnl_method TEXT NOT NULL);
         """)
         existing = {column[1] for column in db.execute("PRAGMA table_info(trades)")}
         for column in ("basis_status", "basis_currency"):
             if column not in existing:
                 db.execute(f"ALTER TABLE trades ADD COLUMN {column} TEXT")
+        if "fee_currency_assumed" not in existing:
+            db.execute("ALTER TABLE trades ADD COLUMN fee_currency_assumed INTEGER NOT NULL DEFAULT 0")
 
 
 _UNSET_CURSOR = object()
@@ -102,16 +109,30 @@ def ingest_source_page(db: sqlite3.Connection, source_key: str, account_id: str,
 
 
 def get_trade(db: sqlite3.Connection, trade_id: str) -> dict | None:
-    row = db.execute("SELECT * FROM trades WHERE id=?", (trade_id,)).fetchone()
-    return dict(row) if row else None
+    row = db.execute(_TRADE_QUERY + " WHERE t.id=?", (trade_id,)).fetchone()
+    return _read_trade(row) if row else None
 
 
 def list_trades(db: sqlite3.Connection, limit: int = 100, offset: int = 0,
                 since: datetime | None = None) -> list[dict]:
-    where = "WHERE close_time >= ?" if since is not None else ""
+    where = "WHERE t.close_time >= ?" if since is not None else ""
     parameters = (since.isoformat(), limit, offset) if since is not None else (limit, offset)
-    return [dict(r) for r in db.execute(
-        f"SELECT * FROM trades {where} ORDER BY close_time DESC, id DESC LIMIT ? OFFSET ?", parameters)]
+    return [_read_trade(r) for r in db.execute(
+        _TRADE_QUERY + f" {where} ORDER BY t.close_time DESC, t.id DESC LIMIT ? OFFSET ?", parameters)]
+
+_TRADE_QUERY = ("SELECT t.*, e.gross_execution_usd AS order_gross_usd, "
+                "e.net_after_fees_usd AS execution_net_pnl_usd, "
+                "e.entry_notional_usd AS order_entry_notional_usd, e.pnl_method "
+                "FROM trades t LEFT JOIN execution_economics e ON t.id=e.trade_id")
+
+def _read_trade(row: sqlite3.Row) -> dict:
+    result = dict(row)
+    order_gross = result.pop("order_gross_usd")
+    order_notional = result.pop("order_entry_notional_usd")
+    if order_gross is not None:
+        result["gross_pnl_usd"] = order_gross
+        result["position_notional_usd"] = order_notional
+    return result
 
 def canonical_json(value: dict) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -124,6 +145,9 @@ def upsert_packet(db: sqlite3.Connection, p: ClosedTradePacket) -> str:
     from contextlib import nullcontext
     transaction = db if not db.in_transaction else nullcontext()
     with transaction:
+        previous = db.execute("SELECT packet_hash FROM trades WHERE id=?", (data["id"],)).fetchone()
+        if previous and previous["packet_hash"] != digest:
+            db.execute("DELETE FROM execution_economics WHERE trade_id=?", (data["id"],))
         for event in p.source_events:
             raw = canonical_json(event.model_dump(mode="json"))
             old = db.execute("SELECT raw_json FROM source_events WHERE source_key=? AND account_id=? AND event_id=?",

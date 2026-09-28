@@ -43,6 +43,19 @@ npm run dev -- --host 127.0.0.1
 
 Open the URL printed by Vite (normally `http://127.0.0.1:5173/`). Sync is an explicit offline CLI action, never an API route. Running it again leaves four fictional close rows and their reasons intact. The API has `GET /api/health`, paged `GET /api/trades` (`recent=true` limits closes to the rolling last 30 days), `GET /api/trades/{id}`, and `PATCH /api/trades/{id}/reason` with `{ "reason": "...", "expected_revision": 0 }`; the last endpoint rejects any attempt to edit exchange fields. The frontend **defaults to the last 30 days**; **Show all history** reveals older saved rows without deleting them. Text filtering acts on the loaded rows; use **Load more trades** when available.
 
+The frontend shows closed trades in a horizontally scrollable spreadsheet, including position, exposure, entry/exit prices, gross P/L, fees, net P/L and reason. Click a row (or its market button with the keyboard) to open the detail panel and edit only the reason. Position quantities and monetary amounts display two decimal places while stored source values keep their original precision. A dash means a value is unavailable, not zero.
+
+For Coinbase CFM futures, the user's working assumption treats the fill `commission` as USD when no currency is supplied; the detail view labels those fees **USD assumed**, not verified by Coinbase. The original fill values remain in source events. Spot commissions are not covered by this assumption. Without matched historical order values and funding inputs, the full settled P/L remains unavailable.
+
+For complete, two-fill CFM closes, an explicit read-only historical-order enrichment can use Coinbase's `filled_value`, `total_fees` and `total_value_after_fees` to calculate **execution gross P/L** and **net after trading fees**. These are not Coinbase-reported settled P/L and exclude funding and settlement adjustments; the UI marks net with † and retains the full net P/L field as unavailable. The order records are stored as immutable source evidence, with a separate calculation row that survives identical source replay. To verify then import only the selected saved markets (after configuring the view-only key), from `backend/`:
+
+```bash
+.venv/bin/python -m tradebook.coinbase_order_sync --db ~/.local/share/market-tradebook/coinbase.sqlite3 --market NOL-19OCT26-CDE --market BCP-20DEC30-CDE --confirm-live-read --dry-run
+.venv/bin/python -m tradebook.coinbase_order_sync --db ~/.local/share/market-tradebook/coinbase.sqlite3 --market NOL-19OCT26-CDE --market BCP-20DEC30-CDE --confirm-live-read --confirm-local-import
+```
+
+The second command creates a timestamped SQLite backup, checks exact order/fill/account/fee consistency, and writes both selected rows atomically. It refuses incomplete/multiple-fill orders rather than estimating a per-close allocation. Rerunning the same import is idempotent; changed source evidence requires investigation.
+
 ## Verify
 
 ```bash

@@ -80,9 +80,11 @@ class _CoinbaseSource:
                     reasons.append(f"{entry_id}: invalid quote-sized fill")
                     continue
             normalized["fee"] = None
-            normalized.pop("fee_currency", None)
+            if self.expected_type == "spot":
+                normalized.pop("fee_currency", None)
             valid.append(normalized)
-        assembly = assemble_closes(valid, product=self.product, source_key=self.source_key, account_id=self.account_id)
+        assembly = assemble_closes(valid, product=self.product, source_key=self.source_key, account_id=self.account_id,
+                                   assume_cfm_commission_usd=self.expected_type != "spot")
         self.unresolved = tuple(reasons) + assembly.unresolved
         return iter(assembly.closes)
 

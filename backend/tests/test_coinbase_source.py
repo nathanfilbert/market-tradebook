@@ -35,11 +35,55 @@ def test_three_adapters_accept_verified_product_and_preserve_raw_evidence():
     for source, kind in zip(sources, ("spot", "perpetual", "dated_future")):
         assert isinstance(source, TradeSource)
         packet, = source.iter_closes()
-        assert packet.product_type == kind and packet.fee_usd is None
+        assert packet.product_type == kind
+        assert packet.fee_usd == (None if kind == "spot" else Decimal("0.2"))
+        assert packet.fee_currency_assumed is (kind != "spot")
         assert packet.source_events[0].payload["commission"] == "0.1"
         assert packet.source_events[0].payload["retail_portfolio_id"] == "acct"
     assert [source.source_key for source in sources] == [
         "coinbase.spot", "coinbase.cfm.us_perpetual", "coinbase.cfm.dated_future"]
+
+
+@pytest.mark.parametrize("expiry,source_class", [
+    ("PERPETUAL", CoinbaseCFMPerpetualSource), ("EXPIRING", CoinbaseCFMDatedFutureSource)])
+def test_cfm_commissions_are_assumed_usd_without_changing_raw_fills(expiry, source_class):
+    fills = [row("entry", "BUY", "2026-01-01T00:00:00Z", product="BTC-CFM", fee="0.2"),
+             row("exit", "SELL", "2026-01-02T00:00:00Z", product="BTC-CFM", fee="0.3")]
+    packet, = source_class("acct", spec("FUTURE", expiry), fills).iter_closes()
+    assert packet.fee_usd == Decimal("0.5")
+    assert packet.fee_currency_assumed is True
+    assert [event.payload["commission"] for event in packet.source_events] == ["0.2", "0.3"]
+    assert all(event.payload.get("fee_currency") is None for event in packet.source_events)
+
+
+def test_reproject_saved_two_fill_cfm_trade_retains_reason_and_evidence(tmp_path):
+    from tradebook.coinbase_closes import assume_saved_cfm_commission_usd
+    from tradebook.store import upsert_packet
+    fills = [row("entry", "BUY", "2026-01-01T00:00:00Z", product="BTC-CFM", fee="0.2"),
+             row("exit", "SELL", "2026-01-02T00:00:00Z", product="BTC-CFM", fee="0.3")]
+    packet, = CoinbaseCFMDatedFutureSource("acct", spec("FUTURE", "EXPIRING"), fills).iter_closes()
+    legacy = packet.model_copy(update={"fee_usd": None, "fee_currency_assumed": False})
+    db = connect(tmp_path / "reproject.sqlite3"); initialize(db)
+    trade_id = upsert_packet(db, legacy)
+    update_reason(db, trade_id, "user's reason", 0)
+    evidence = tuple(row[0] for row in db.execute("SELECT raw_json FROM source_events ORDER BY event_id"))
+    updated = assume_saved_cfm_commission_usd(legacy)
+    assert upsert_packet(db, updated) == trade_id
+    saved = get_trade(db, trade_id)
+    assert saved["fee_usd"] == "0.5" and saved["fee_currency_assumed"] == 1
+    assert saved["reason"] == "user's reason" and saved["reason_revision"] == 1
+    assert saved["gross_pnl_usd"] is None and saved["net_pnl_usd"] is None
+    assert evidence == tuple(row[0] for row in db.execute("SELECT raw_json FROM source_events ORDER BY event_id"))
+
+
+@pytest.mark.parametrize("currency_field", ["fee_currency", "commission_currency"])
+def test_explicit_non_usd_commission_currency_is_not_assumed_usd(currency_field):
+    entry = row("entry", "BUY", "2026-01-01T00:00:00Z", product="BTC-CFM")
+    exit = row("exit", "SELL", "2026-01-02T00:00:00Z", product="BTC-CFM")
+    entry[currency_field] = "BTC"
+    exit[currency_field] = "BTC"
+    packet, = CoinbaseCFMDatedFutureSource("acct", spec("FUTURE", "EXPIRING"), [entry, exit]).iter_closes()
+    assert packet.fee_usd is None and packet.fee_currency_assumed is False
 
 
 @pytest.mark.parametrize("change,reason", [(dict(size_in_quote="unknown"), "quote"), (dict(trade_type="ADJUSTMENT"), "adjustment"), (dict(price=None), "missing")])

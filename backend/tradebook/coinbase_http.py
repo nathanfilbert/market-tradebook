@@ -49,6 +49,10 @@ class CoinbaseHTTP:
     def _allowed(path: str) -> bool:
         if path in _STATIC_ROUTES or _wallet_route(path):
             return True
+        order_prefix = "/api/v3/brokerage/orders/historical/"
+        if path.startswith(order_prefix):
+            order_id = path[len(order_prefix):]
+            return bool(order_id) and order_id not in {".", "..", "fills"} and quote(order_id, safe="") == order_id
         prefix = "/api/v3/brokerage/products/"
         if path.startswith(prefix):
             product_id = path[len(prefix):]

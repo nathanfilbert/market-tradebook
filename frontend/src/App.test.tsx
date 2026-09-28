@@ -1,6 +1,6 @@
 // frontend/src/App.test.tsx
 import { afterEach, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor, cleanup } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, cleanup, within } from '@testing-library/react'
 import App from './App'
 import * as api from './api'
 
@@ -14,6 +14,41 @@ const trade: api.Trade = { id: 't1', source_key: 'mock.spot', account_id: 'demo'
   reconciliation_status: 'not_available',
   reason: null, reason_revision: 0 }
 
+it('shows a spreadsheet of trades with two-decimal position and fee displays', async () => {
+  vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [{ ...trade,
+    closed_quantity: '1.2345', fee_usd: '0.878455', position_notional_usd: '6000.999' }], has_more: false })
+  render(<App />)
+  const table = await screen.findByRole('table', { name: 'Trades' })
+  expect(table).toBeTruthy()
+  expect(within(table).getAllByRole('columnheader')[0].textContent).toBe('Market')
+  for (const heading of ['Closed', 'Market', 'Type', 'Side', 'Position', 'Entry', 'Exit', 'Gross P/L', 'Fees', 'Net P/L']) {
+    expect(screen.getByRole('columnheader', { name: heading })).toBeTruthy()
+  }
+  const row = screen.getByRole('row', { name: /BTC-USD/ })
+  expect(row.textContent).toContain('1.23 BTC')
+  expect(row.textContent).toContain('$0.88')
+  expect(screen.queryByRole('region', { name: 'Trade details' })).toBeNull()
+  fireEvent.click(row)
+  const details = screen.getByRole('region', { name: 'Trade details' })
+  expect(within(details).getByText(/1\.23 BTC/)).toBeTruthy()
+  expect(within(details).getByText('$6,001.00')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Close details' }))
+  expect(screen.queryByRole('region', { name: 'Trade details' })).toBeNull()
+})
+
+it('moves keyboard focus into details and back to the trade on Escape', async () => {
+  vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [trade], has_more: false })
+  render(<App />)
+  const opener = await screen.findByRole('button', { name: 'Open details for BTC-USD' })
+  opener.focus()
+  fireEvent.click(opener)
+  const close = screen.getByRole('button', { name: 'Close details' })
+  await waitFor(() => expect(document.activeElement).toBe(close))
+  fireEvent.keyDown(close, { key: 'Escape' })
+  expect(screen.queryByRole('region', { name: 'Trade details' })).toBeNull()
+  expect(document.activeElement).toBe(opener)
+})
+
 it('shows sourced columns and saves only reason', async () => {
   vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [trade], has_more: false })
   vi.spyOn(api, 'saveReason').mockResolvedValue({ ...trade, reason: 'Breakout', reason_revision: 1 })
@@ -21,9 +56,11 @@ it('shows sourced columns and saves only reason', async () => {
   expect((await screen.findAllByText('BTC-USD')).length).toBeGreaterThan(0)
   expect(api.fetchTrades).toHaveBeenCalledWith(0, true)
   expect(screen.getByText('$6,000.00')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Open details for BTC-USD' }))
   fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'Breakout' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save reason' }))
   await waitFor(() => expect(api.saveReason).toHaveBeenCalledWith('t1', 'Breakout', 0))
+  expect(await within(screen.getByRole('region', { name: 'Trade details' })).findByText('Reason saved.')).toBeTruthy()
   expect(screen.queryByLabelText('Net P/L')).toBeNull()
 })
 
@@ -39,6 +76,7 @@ it('labels unknown cross-currency basis without inventing profit', async () => {
     position_notional_usd: null, gross_pnl_usd: null, net_pnl_usd: null }], has_more: false })
   render(<App />)
   await screen.findAllByText('BTC-USD')
+  fireEvent.click(screen.getByRole('button', { name: 'Open details for BTC-USD' }))
   expect(screen.getByText(/Cross-currency basis unavailable/)).toBeTruthy()
   expect(screen.getByText(/USDC/)).toBeTruthy()
 })
@@ -65,7 +103,35 @@ it('defaults to the last 30 days and can show all saved history', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Show all history' }))
   expect(await screen.findByText('ETH-USD')).toBeTruthy()
   expect(api.fetchTrades).toHaveBeenLastCalledWith(0, false)
-  expect(screen.getByRole('button', { name: 'Show last 30 days' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Last 30 days' })).toBeTruthy()
+})
+
+it('shows fill prices and labels assumed USD commissions as an assumption', async () => {
+  vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [{ ...trade, product_type: 'dated_future',
+    entry_price: '321.9', exit_price: '332.65', price_currency: 'USD',
+    fee_usd: '0.878455', fee_currency_assumed: true }], has_more: false })
+  render(<App />)
+  expect(await screen.findByText('321.9 USD')).toBeTruthy()
+  expect(screen.getByText('332.65 USD')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Open details for BTC-USD' }))
+  expect(within(screen.getByRole('region', { name: 'Trade details' })).getByText(/\$0\.88.*USD assumed/)).toBeTruthy()
+})
+
+it('shows order-derived gross and net after fees without claiming full settled net', async () => {
+  vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [{ ...trade, product_type: 'dated_future',
+    gross_pnl_usd: '43.9', net_pnl_usd: null, execution_net_pnl_usd: '41.826195',
+    pnl_method: 'coinbase_orders_ex_funding', funding_usd: null,
+    fee_usd: '2.073805', fee_currency_assumed: true }], has_more: false })
+  render(<App />)
+  const row = await screen.findByRole('row', { name: /BTC-USD/ })
+  expect(row.textContent).toContain('$43.90')
+  expect(row.textContent).toContain('$41.83')
+  expect(screen.getByText(/Net after fees.*excludes funding/)).toBeTruthy()
+  fireEvent.click(row)
+  const details = screen.getByRole('region', { name: 'Trade details' })
+  expect(within(details).getByText(/\$41\.83/)).toBeTruthy()
+  expect(within(details).getByText(/not Coinbase-settled/)).toBeTruthy()
+  expect(within(details).getByText('Net P/L including funding').nextElementSibling?.textContent).toBe('—')
 })
 
 it('ignores overlapping load-more clicks and duplicate returned rows', async () => {
@@ -95,6 +161,7 @@ it('shows a failed reason save without claiming success', async () => {
   vi.spyOn(api, 'saveReason').mockRejectedValue(new Error('conflict'))
   render(<App />)
   await screen.findAllByText('BTC-USD')
+  fireEvent.click(screen.getByRole('button', { name: 'Open details for BTC-USD' }))
   fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'My thesis' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save reason' }))
   expect(await screen.findByText(/Could not save reason/)).toBeTruthy()
@@ -108,6 +175,7 @@ it('does not attribute a late save to a newly selected trade', async () => {
   vi.spyOn(api, 'saveReason').mockImplementation(() => new Promise(resolve => { resolveSave = resolve }))
   render(<App />)
   await screen.findAllByText('BTC-USD')
+  fireEvent.click(screen.getByRole('button', { name: 'Open details for BTC-USD' }))
   fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'BTC thesis' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save reason' }))
   fireEvent.click(screen.getByRole('button', { name: /ETH-USD/ }))

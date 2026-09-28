@@ -47,7 +47,45 @@ def _fill_order(fill) -> tuple[datetime, str]:
     return datetime.max.replace(tzinfo=timezone.utc), ""
 
 
-def assemble_closes(fills, *, product: ProductSpecification, source_key: str, account_id: str) -> CloseAssembly:
+def _usd_fee(fill: dict, *, assume_cfm_commission_usd: bool) -> tuple[Decimal | None, bool]:
+    if fill.get("fee") is not None:
+        if str(fill.get("fee_currency", "")).upper() != "USD":
+            return None, False
+        value = _decimal(fill["fee"], "fee")
+        if value < 0:
+            raise ValueError("negative fee")
+        return value, False
+    if (assume_cfm_commission_usd and fill.get("fee_currency") is None
+            and fill.get("commission_currency") is None
+            and fill.get("commission") is not None):
+        value = _decimal(fill["commission"], "commission")
+        if value < 0:
+            raise ValueError("negative commission")
+        return value, True
+    return None, False
+
+
+def assume_saved_cfm_commission_usd(packet: ClosedTradePacket) -> ClosedTradePacket:
+    """Reproject a saved complete two-fill CFM close without altering source evidence."""
+    if (packet.product_type not in {"dated_future", "perpetual"} or packet.fee_usd is not None
+            or len(packet.source_events) != 2):
+        raise ValueError("not an unpriced two-fill CFM close")
+    fees = []
+    for event in packet.source_events:
+        fill = event.payload
+        if (fill.get("trade_type") != "FILL" or fill.get("size_in_quote") is not False
+                or _decimal(fill.get("size"), "size") != packet.closed_quantity
+                or fill.get("fee_currency") is not None or fill.get("commission_currency") is not None):
+            raise ValueError("CFM fill quantity or commission currency is ambiguous")
+        value, assumed = _usd_fee(fill, assume_cfm_commission_usd=True)
+        if value is None or not assumed:
+            raise ValueError("CFM commission is unavailable")
+        fees.append(value)
+    return packet.model_copy(update={"fee_usd": sum(fees, Decimal(0)), "fee_currency_assumed": True})
+
+
+def assemble_closes(fills, *, product: ProductSpecification, source_key: str, account_id: str,
+                    assume_cfm_commission_usd: bool = False) -> CloseAssembly:
     """Assemble unambiguous single-lot reductions; unsupported events are quarantined."""
     unit = product.quantity_unit
     if not isinstance(unit, str) or not unit.strip() or unit.lower() in {"unknown", "n/a", "null"}:
@@ -84,6 +122,7 @@ def assemble_closes(fills, *, product: ProductSpecification, source_key: str, ac
             when = _time(fill.get("trade_time"))
             if qty <= 0 or price <= 0:
                 raise ValueError("size and price must be positive")
+            fee, fee_assumed = _usd_fee(fill, assume_cfm_commission_usd=assume_cfm_commission_usd and product.product_type != "spot")
             if fill.get("position_effect") not in (None, "OPEN", "CLOSE"):
                 unresolved.append(f"{entry_id}: unsupported position effect")
                 continue
@@ -94,8 +133,8 @@ def assemble_closes(fills, *, product: ProductSpecification, source_key: str, ac
                     unresolved.append(f"{entry_id}: missing entry")
                 else:
                     lots.append({"id": entry_id, "side": side, "qty": qty, "original_qty": qty,
-                                 "price": price, "time": when, "fee": fill.get("fee"),
-                                 "fee_currency": fill.get("fee_currency"), "payload": dict(fill), "fee_allocated": Decimal(0)})
+                                 "price": price, "time": when, "fee": fee, "fee_assumed": fee_assumed,
+                                 "payload": dict(fill), "fee_allocated": Decimal(0)})
                     if unknown_episode:
                         unknown_episode.append(SourceEvent(event_id=entry_id, occurred_at=when, payload=dict(fill)))
                 continue
@@ -146,12 +185,12 @@ def assemble_closes(fills, *, product: ProductSpecification, source_key: str, ac
             else:
                 unresolved.append(f"{entry_id}: ambiguous multiple lots" if lots else f"{entry_id}: missing entry")
                 continue
-            close_fee = _decimal(fill.get("fee"), "fee") if fill.get("fee") is not None else None
+            close_fee = fee
             for lot, close_qty in allocations:
-                exit_usd = close_fee * close_qty / qty if close_fee is not None and str(fill.get("fee_currency", "")).upper() == "USD" else None
+                exit_usd = close_fee * close_qty / qty if close_fee is not None else None
                 entry_fee_usd = None
-                if lot["fee"] is not None and str(lot["fee_currency"] or "").upper() == "USD":
-                    entry_total = _decimal(lot["fee"], "fee")
+                if lot["fee"] is not None:
+                    entry_total = lot["fee"]
                     entry_fee_usd = entry_total * close_qty / lot["original_qty"]
                     lot["fee_allocated"] += entry_fee_usd
                     if lot["qty"] == close_qty:
@@ -166,6 +205,7 @@ def assemble_closes(fills, *, product: ProductSpecification, source_key: str, ac
                     closed_quantity=close_qty, quantity_unit=unit, entry_price=lot["price"], exit_price=price,
                     contract_multiplier=Decimal(1) if product.product_type == "spot" else product.contract_multiplier,
                     price_currency=product.quote_currency, fee_usd=fee_usd,
+                    fee_currency_assumed=fee_usd is not None and (fee_assumed or lot["fee_assumed"]),
                     funding_usd=None, source_events=events))
                 remaining = lot["qty"] - close_qty
                 if remaining == 0:

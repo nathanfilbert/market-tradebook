@@ -43,6 +43,7 @@ class ClosedTradePacket(StrictModel):
     contract_multiplier: Decimal | None = Field(default=None, gt=0)
     price_currency: str = Field(min_length=1)
     fee_usd: Decimal | None = Field(default=None, ge=0)
+    fee_currency_assumed: bool = False
     funding_usd: Decimal | None = None
     reported_gross_usd: Decimal | None = None
     reported_net_usd: Decimal | None = None

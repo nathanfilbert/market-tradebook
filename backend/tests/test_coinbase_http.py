@@ -18,6 +18,16 @@ def test_get_decodes_json_and_authenticates_encoded_get_uri():
     assert calls[0][0].endswith("?limit=100&product_ids=BTC-USD")
     assert auth == [("GET", calls[0][0].removeprefix("https://api.coinbase.com"))]
 
+def test_historical_order_get_allows_only_encoded_single_order_id():
+    calls = []
+    client = CoinbaseHTTP(lambda url, headers, timeout: (calls.append(url) or 200, '{"order":{}}'), lambda method, uri: "token")
+    assert client.get("/api/v3/brokerage/orders/historical/order-1") == {"order": {}}
+    for path in ("/api/v3/brokerage/orders/historical/", "/api/v3/brokerage/orders/historical/order/other",
+                 "/api/v3/brokerage/orders/historical/..", "/api/v3/brokerage/orders/historical/order?x=1"):
+        with pytest.raises(CoinbaseReadError):
+            client.get(path)
+    assert len(calls) == 1
+
 
 def test_non_get_and_unallowlisted_route_rejected_before_request():
     calls = []
