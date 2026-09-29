@@ -24,6 +24,7 @@ it('shows a spreadsheet of trades with two-decimal position and fee displays', a
   for (const heading of ['Closed', 'Market', 'Type', 'Side', 'Position', 'Entry', 'Exit', 'Gross P/L', 'Fees', 'Net P/L']) {
     expect(screen.getByRole('columnheader', { name: heading })).toBeTruthy()
   }
+  expect(screen.getByRole('region', { name: 'Visible total profit and loss' }).textContent).toContain('$188.00')
   const row = screen.getByRole('row', { name: /BTC-USD/ })
   expect(row.textContent).toContain('1.23 BTC')
   expect(row.textContent).toContain('$0.88')
@@ -34,6 +35,17 @@ it('shows a spreadsheet of trades with two-decimal position and fee displays', a
   expect(within(details).getByText('$6,001.00')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Close details' }))
   expect(screen.queryByRole('region', { name: 'Trade details' })).toBeNull()
+})
+
+it('totals only visible filtered trades and excludes unavailable P/L', async () => {
+  vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [trade,
+    { ...trade, id: 't2', market: 'ETH-USD', net_pnl_usd: '-50.25' },
+    { ...trade, id: 't3', market: 'SOL-USD', net_pnl_usd: null }], has_more: false })
+  render(<App />)
+  await screen.findByText('SOL-USD')
+  expect(screen.getByRole('region', { name: 'Visible total profit and loss' }).textContent).toContain('$137.75')
+  fireEvent.change(screen.getByPlaceholderText('Market, type or source'), { target: { value: 'ETH' } })
+  expect(screen.getByRole('region', { name: 'Visible total profit and loss' }).textContent).toContain('-$50.25')
 })
 
 it('moves keyboard focus into details and back to the trade on Escape', async () => {
@@ -57,7 +69,7 @@ it('shows sourced columns and saves only reason', async () => {
   expect(api.fetchTrades).toHaveBeenCalledWith(0, true)
   expect(screen.getByText('$6,000.00')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Open details for BTC-USD' }))
-  fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'Breakout' } })
+  fireEvent.change(screen.getByLabelText('Entry reason'), { target: { value: 'Breakout' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save reason' }))
   await waitFor(() => expect(api.saveReason).toHaveBeenCalledWith('t1', 'Breakout', 0))
   expect(await within(screen.getByRole('region', { name: 'Trade details' })).findByText('Reason saved.')).toBeTruthy()
@@ -162,10 +174,10 @@ it('shows a failed reason save without claiming success', async () => {
   render(<App />)
   await screen.findAllByText('BTC-USD')
   fireEvent.click(screen.getByRole('button', { name: 'Open details for BTC-USD' }))
-  fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'My thesis' } })
+  fireEvent.change(screen.getByLabelText('Entry reason'), { target: { value: 'My thesis' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save reason' }))
   expect(await screen.findByText(/Could not save reason/)).toBeTruthy()
-  expect((screen.getByLabelText('Reason') as HTMLTextAreaElement).value).toBe('My thesis')
+  expect((screen.getByLabelText('Entry reason') as HTMLTextAreaElement).value).toBe('My thesis')
 })
 
 it('does not attribute a late save to a newly selected trade', async () => {
@@ -176,10 +188,10 @@ it('does not attribute a late save to a newly selected trade', async () => {
   render(<App />)
   await screen.findAllByText('BTC-USD')
   fireEvent.click(screen.getByRole('button', { name: 'Open details for BTC-USD' }))
-  fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'BTC thesis' } })
+  fireEvent.change(screen.getByLabelText('Entry reason'), { target: { value: 'BTC thesis' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save reason' }))
   fireEvent.click(screen.getByRole('button', { name: /ETH-USD/ }))
   await act(async () => resolveSave({ ...trade, reason: 'BTC thesis', reason_revision: 1 }))
-  expect((screen.getByLabelText('Reason') as HTMLTextAreaElement).value).toBe('ETH thesis')
+  expect((screen.getByLabelText('Entry reason') as HTMLTextAreaElement).value).toBe('ETH thesis')
   expect(screen.queryByText('Reason saved.')).toBeNull()
 })
