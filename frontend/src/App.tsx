@@ -29,6 +29,14 @@ export default function App() {
   const reasonStatus = status === 'Reason saved.' || status.startsWith('Could not save reason.')
   const visible = useMemo(() => trades.filter(t =>
     `${t.market} ${t.product_type} ${t.source_key}`.toLowerCase().includes(query.toLowerCase())), [trades, query])
+  const visiblePnl = useMemo(() => {
+    const cents = visible.reduce((total, trade) => {
+      const value = trade.execution_net_pnl_usd ?? trade.net_pnl_usd
+      return value === null ? total : total + Math.round(Number(value) * 100)
+    }, 0)
+    return cents === 0 && !visible.some(trade => (trade.execution_net_pnl_usd ?? trade.net_pnl_usd) !== null)
+      ? null : (cents / 100).toFixed(2)
+  }, [visible])
   useEffect(() => {
     let cancelled = false
     fetchTrades(0, recentOnly).then(page => {
@@ -94,6 +102,11 @@ export default function App() {
     <header className="topbar"><div><p className="eyebrow">COINBASE · CAPTURE ONLY</p><h1>Tradebook</h1>
       <p className="subtitle">A clear view of your closed trades. Select a row for details and your reason.</p></div>
     </header>
+    <section className="pnl-summary" aria-label="Visible total profit and loss">
+      <span className="pnl-summary-label">VISIBLE TOTAL P/L</span>
+      <strong className={visiblePnl === null ? 'muted' : Number(visiblePnl) < 0 ? 'negative' : 'positive'}>{money(visiblePnl)}</strong>
+      <span className="pnl-summary-note">Visible rows only; unavailable P/L excluded.</span>
+    </section>
     <div className="toolbar"><div className="view-controls"><span className="view-label">VIEW</span>
       <button className={recentOnly ? 'view-button current' : 'view-button'} onClick={() => { if (!recentOnly) changeWindow() }} aria-pressed={recentOnly}>Last 30 days</button>
       <button className={!recentOnly ? 'view-button current' : 'view-button'} onClick={() => { if (recentOnly) changeWindow() }} aria-pressed={!recentOnly}>{recentOnly ? 'Show all history' : 'All history'}</button></div>
@@ -106,7 +119,7 @@ export default function App() {
         <th scope="col" className="numeric">Exposure</th><th scope="col" className="numeric">Entry</th>
         <th scope="col" className="numeric">Exit</th><th scope="col" className="numeric">Gross P/L</th>
         <th scope="col" className="numeric">Fees</th><th scope="col" className="numeric">Net P/L</th>
-        <th scope="col">Reason</th></tr></thead><tbody>
+        <th scope="col">Entry reason</th></tr></thead><tbody>
       {visible.map(t => <tr key={t.id} className={t.id === selected ? 'selected' : ''} onClick={() => choose(t)}>
         <td><button id={`trade-${t.id}`} className="market-button" onClick={() => choose(t)} aria-label={`Open details for ${t.market}`}>{t.market}</button></td>
         <td className="date-cell">{new Date(t.close_time).toLocaleDateString()}</td>
@@ -148,7 +161,7 @@ export default function App() {
         <dt>Source-reported gross</dt><dd>{money(active.reported_gross_usd)}</dd>
         <dt>Source-reported net</dt><dd>{money(active.reported_net_usd)}</dd>
         <dt>Reconciliation</dt><dd>{active.reconciliation_status.replaceAll('_', ' ')}</dd>
-      </dl><label>Reason<textarea value={reason} onChange={e => setReason(e.target.value)} maxLength={4000} /></label>
+      </dl><label>Entry reason<textarea value={reason} onChange={e => setReason(e.target.value)} maxLength={4000} /></label>
       <button className="primary-button" onClick={submit} disabled={saving}>Save reason</button>
       {reasonStatus && <p role="status" className="detail-status">{status}</p>}
     </aside>}
