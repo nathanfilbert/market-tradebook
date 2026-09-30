@@ -167,7 +167,7 @@ def test_spot_import_requires_separate_local_write_confirmation(tmp_path, monkey
     assert sync.main(args + ["--confirm-local-import"]) == 0
     with connect(path) as db:
         assert get_trade(db, row["id"])["reason"] == "TEST ONLY"
-    assert len(list(tmp_path.glob("live.*.backup.sqlite3"))) == 1
+    assert not list(tmp_path.glob("live.*.backup.sqlite3"))  # Unchanged replay performs no write.
 
 
 def test_live_import_rejects_existing_mock_database(tmp_path, monkeypatch):

@@ -1,0 +1,10 @@
+[Unit]
+Description=Market Tradebook read-only Coinbase capture
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nathan/projects/market-tradebook/backend
+ExecStart=/home/nathan/projects/market-tradebook/backend/.venv/bin/python -m tradebook.recurring_sync --config %h/.config/market-tradebook/sync.json --confirm-live-read --confirm-local-import
+TimeoutStartSec=10min
+UMask=0077
+NoNewPrivileges=true

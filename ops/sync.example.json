@@ -1,0 +1,11 @@
+{
+  "db": "~/.local/share/market-tradebook/coinbase.sqlite3",
+  "max_fills": 1000,
+  "sources": [
+    {
+      "source": "coinbase-cfm-dated-future",
+      "product_id": "BIP-20DEC30-CDE",
+      "portfolio_id": "REPLACE_WITH_VERIFIED_PORTFOLIO_ID"
+    }
+  ]
+}

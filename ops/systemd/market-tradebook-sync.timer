@@ -1,0 +1,11 @@
+[Unit]
+Description=Capture configured Coinbase trades every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=5min
+AccuracySec=10s
+Unit=market-tradebook-sync.service
+
+[Install]
+WantedBy=timers.target
