@@ -1,0 +1,12 @@
+[Unit]
+Description=Market Tradebook
+Wants=market-tradebook-api.service market-tradebook-ui.service
+After=market-tradebook-api.service market-tradebook-ui.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

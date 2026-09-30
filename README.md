@@ -107,3 +107,25 @@ To inspect a backup without touching the original database, set `TRADEBOOK_DB` t
 ## Boundaries
 
 No credentials are bundled, and there is no live sync scheduler, hosted deployment, multi-user access, trade placement, tax accounting, or automatic reason generation. Coinbase dry-run requires a separately configured read-only CDP key, explicit product/portfolio IDs and `--confirm-live-read`; it reads Coinbase but writes no trade records. Actual product coverage, lot matching, currency conversion and fee/funding allocation require account-specific verification before live writes can be enabled. See `docs/field-contract.md` and `docs/architecture.html` for the design record.
+
+## Local systemd service
+
+The user service `market-tradebook.service` manages the API and local Vite frontend
+through two companion units. Unit sources are in `ops/systemd/`; installed copies
+are in `~/.config/systemd/user/`. The API uses the existing Coinbase ledger at
+`~/.local/share/market-tradebook/coinbase.sqlite3`; starting the service performs no
+Coinbase sync or mock import. Both listeners bind to localhost only.
+
+- UI: http://127.0.0.1:5173/
+- API: http://127.0.0.1:8017/api/health
+
+```bash
+systemctl --user status market-tradebook.service market-tradebook-api.service market-tradebook-ui.service
+systemctl --user restart market-tradebook.service
+systemctl --user stop market-tradebook.service
+journalctl --user -u market-tradebook-api.service -u market-tradebook-ui.service
+```
+
+The main unit is enabled at user-manager startup. User lingering is already enabled,
+so it also starts at boot without requiring an interactive login. The frontend uses
+the existing local development server; this is a single-user local setup.

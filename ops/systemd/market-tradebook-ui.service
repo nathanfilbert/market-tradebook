@@ -1,0 +1,13 @@
+[Unit]
+Description=Market Tradebook local frontend
+PartOf=market-tradebook.service
+After=market-tradebook-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nathan/projects/market-tradebook/frontend
+ExecStart=/usr/bin/node /home/nathan/projects/market-tradebook/frontend/node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173 --strictPort
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true

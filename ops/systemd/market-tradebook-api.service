@@ -1,0 +1,13 @@
+[Unit]
+Description=Market Tradebook API
+PartOf=market-tradebook.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nathan/projects/market-tradebook/backend
+Environment=TRADEBOOK_DB=/home/nathan/.local/share/market-tradebook/coinbase.sqlite3
+ExecStart=/home/nathan/projects/market-tradebook/backend/.venv/bin/python -m uvicorn tradebook.api:app --host 127.0.0.1 --port 8017
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
