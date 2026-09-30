@@ -71,6 +71,17 @@ curl -fsS http://127.0.0.1:8017/api/trades
 
 The mock sync prints `synced 4 fictional close packets`. The first page has four records and `has_more: false`. Tests also check partial-close event deduplication, reason-only editing, and backup restoration. The built frontend is generated at `frontend/dist/` but is not served by FastAPI; local operation uses the two processes above.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pushes, pull requests and manual dispatch. Its
+independent jobs run Python 3.11 backend tests, Node 22 frontend tests/build/lint,
+and Gitleaks over the full fetched Git history. Action revisions are pinned and
+the Gitleaks binary is version-pinned and checksum-verified. Secret findings fail
+the scan with values redacted. `.gitleaksignore` contains one exact historical
+fingerprint for a confirmed synthetic test placeholder; test files remain scanned.
+CI requires no Coinbase credentials and performs no
+live sync or deployment.
+
 ## Coinbase read-only preflight (not live import)
 
 After configuring a **view-only** CDP key in the ignored, owner-readable project `.env` as `COINBASE_API_KEY_NAME` and `COINBASE_API_KEY_SECRET`, and selecting a verified canonical product and portfolio ID, an explicitly authorized dry-run can be invoked from `backend/`. The direct API signer uses the CDP SDK and accepts Ed25519; the older Advanced Trade SDK does not.
@@ -137,6 +148,7 @@ the existing local development server; this is a single-user local setup.
 local configuration; it does not discover or import arbitrary markets. Copy
 `ops/sync.example.json` to `~/.config/market-tradebook/sync.json`, replace the
 portfolio ID with the verified account identity, and add other reviewed products.
+The configuration supports up to 32 distinct account/product selections.
 Keep the configuration owner-readable (`chmod 600`). Credentials continue to come
 from the ignored project `.env`, never the configuration or systemd arguments.
 

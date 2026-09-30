@@ -23,7 +23,7 @@ def test_direct_advanced_trade_get_uses_ed25519_jwt(monkeypatch):
 def test_authenticator_uses_cdp_generator_with_exact_get_uri_and_call_time_env(monkeypatch):
     calls = []
     key_name = "organizations/example/apiKeys/key-id"
-    secret = "ED25519-SECRET-MATERIAL"
+    secret = "synthetic"
 
     def generate(options):
         calls.append(options)

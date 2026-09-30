@@ -1,0 +1,3 @@
+# Only this historical fake-signer placeholder is ignored, not the test file.
+# The current fixture uses "synthetic"; no actual credential was present.
+751e0edaad66461652fdc3f7c14ac43219738b37:backend/tests/test_coinbase_auth.py:generic-api-key:26
