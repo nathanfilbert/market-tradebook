@@ -83,3 +83,24 @@ def test_capture_failure_skips_enrichment_for_that_product(tmp_path, monkeypatch
     monkeypatch.setattr(runner, 'order_sync_main', lambda args: calls.append(args) or 2)
     assert runner.main(['--config', str(path), '--confirm-live-read', '--confirm-local-import']) == 2
     assert len(calls) == 1 and 'OIL-CFM' in calls[0]
+
+
+@pytest.mark.parametrize('count', [23, 30, 32])
+def test_configuration_supports_full_perp_catalog_and_existing_dated_contract(tmp_path, count):
+    path = config(tmp_path)
+    data = json.loads(path.read_text())
+    data['sources'] = [{'source': 'coinbase-cfm-dated-future', 'product_id': f'CFM-{i}',
+                        'portfolio_id': 'portfolio'} for i in range(count)]
+    path.write_text(json.dumps(data))
+    _, _, sources = runner.load_config(path)
+    assert len(sources) == count
+
+
+def test_configuration_still_rejects_unbounded_source_list(tmp_path):
+    path = config(tmp_path)
+    data = json.loads(path.read_text())
+    data['sources'] = [{'source': 'coinbase-cfm-dated-future', 'product_id': f'CFM-{i}',
+                        'portfolio_id': 'portfolio'} for i in range(33)]
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError):
+        runner.load_config(path)

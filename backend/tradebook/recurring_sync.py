@@ -9,6 +9,8 @@ from pathlib import Path
 from .sync import DEFAULT_DB, SOURCE_TYPES, main as sync_main
 from .coinbase_order_sync import main as order_sync_main
 
+MAX_SOURCE_SELECTIONS = 32
+
 
 def load_config(path: Path) -> tuple[Path, int, list[dict]]:
     config = json.loads(path.read_text())
@@ -23,7 +25,7 @@ def load_config(path: Path) -> tuple[Path, int, list[dict]]:
     if type(maximum) is not int or not 1 <= maximum <= 10000:
         raise ValueError("invalid history bound")
     sources = config["sources"]
-    if not isinstance(sources, list) or not 1 <= len(sources) <= 20:
+    if not isinstance(sources, list) or not 1 <= len(sources) <= MAX_SOURCE_SELECTIONS:
         raise ValueError("explicit bounded source selections required")
     seen = set()
     for source in sources:
