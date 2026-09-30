@@ -160,3 +160,118 @@ def test_order_execution_is_public_as_calculated_values_not_raw_order_payload(tm
         assert value["net_pnl_usd"] is None
         assert value["pnl_method"] == "coinbase_orders_ex_funding"
         assert "packet_json" not in value and "raw_json" not in value
+
+
+def second_fixture():
+    packet, orders = fixture()
+    packet = packet.model_copy(deep=True, update={"close_id": "second-close"})
+    for event in packet.source_events:
+        event.event_id += '-2'
+        event.payload['entry_id'] = event.event_id
+        event.payload['order_id'] += '-2'
+    for order in orders:
+        order['order_id'] += '-2'
+    return packet, orders
+
+
+def test_multiple_closes_in_one_market_enrich_individually_and_replay_is_noop(tmp_path):
+    packet, orders = fixture()
+    other, other_orders = second_fixture()
+    path = tmp_path / 'book.sqlite3'
+    with connect(path) as db:
+        initialize(db)
+        ids = [upsert_packet(db, p) for p in (packet, other)]
+        update_reason(db, ids[1], 'keep this reason', 0)
+    calls = []
+    class HTTP:
+        def get(self, route):
+            calls.append(route)
+            return {'order': next(o for o in orders + other_orders if route.endswith('/' + o['order_id']))}
+    args = ['--db', str(path), '--market', 'NOL-CDE', '--portfolio-id', 'acct',
+            '--pending-only', '--confirm-live-read']
+    assert order_sync_main(args + ['--dry-run'], http=HTTP()) == 0
+    with connect(path) as db:
+        assert not db.execute('SELECT * FROM execution_economics').fetchall()
+    calls.clear()
+    assert order_sync_main(args + ['--confirm-local-import'], http=HTTP()) == 0
+    assert len(calls) == 4
+    with connect(path) as db:
+        assert all(get_trade(db, i)['position_notional_usd'] == '917.9' for i in ids)
+        assert get_trade(db, ids[1])['reason'] == 'keep this reason'
+        assert get_trade(db, ids[1])['reason_revision'] == 1
+        assert all(get_trade(db, i)['net_pnl_usd'] is None for i in ids)
+        # Strict manual selection also supports multiple saved closes now.
+        assert len(collect_saved_executions(db, ['NOL-CDE'], HTTP())) == 2
+    calls.clear()
+    before = path.stat().st_mtime_ns
+    assert order_sync_main(args + ['--confirm-local-import'], http=HTTP()) == 0
+    assert not calls and path.stat().st_mtime_ns == before
+    assert len(list(tmp_path.glob('*.backup.sqlite3'))) == 1
+
+
+def test_pending_enrichment_isolates_bad_order_and_skips_partial_and_other_account(tmp_path):
+    from tradebook.coinbase_order_pnl import collect_pending_executions
+    packet, orders = fixture()
+    bad, bad_orders = second_fixture()
+    bad_orders[0]['total_fees'] = '999'
+    partial = packet.model_copy(deep=True, update={'close_id': 'partial', 'closed_quantity': Decimal('0.5')})
+    foreign = packet.model_copy(deep=True, update={'close_id': 'foreign', 'account_id': 'another-account'})
+    path = tmp_path / 'book.sqlite3'
+    with connect(path) as db:
+        initialize(db)
+        ids = [upsert_packet(db, p) for p in (packet, bad, partial, foreign)]
+    calls = []
+    class HTTP:
+        def get(self, route):
+            calls.append(route)
+            return {'order': next(o for o in orders + bad_orders if route.endswith('/' + o['order_id']))}
+    args = ['--db', str(path), '--market', 'NOL-CDE', '--portfolio-id', 'acct',
+            '--pending-only', '--confirm-live-read', '--confirm-local-import']
+    assert order_sync_main(args, http=HTTP()) == 2  # Failure is visible, valid close still saved.
+    assert len(calls) == 4
+    with connect(path) as db:
+        assert get_trade(db, ids[0])['execution_net_pnl_usd'] == '41.826195'
+        assert all(get_trade(db, i)['execution_net_pnl_usd'] is None for i in ids[1:])
+        assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+
+
+def test_pending_enrichment_bounds_order_reads(tmp_path):
+    from tradebook.coinbase_order_pnl import collect_pending_executions
+    packet, orders = fixture()
+    other, other_orders = second_fixture()
+    with connect(tmp_path / 'book.sqlite3') as db:
+        initialize(db)
+        for p in (packet, other): upsert_packet(db, p)
+        calls = []
+        class HTTP:
+            def get(self, route):
+                calls.append(route)
+                return {'order': next(o for o in orders + other_orders if route.endswith('/' + o['order_id']))}
+        collected, skipped, failed, deferred = collect_pending_executions(db, ['NOL-CDE'], 'acct', HTTP(), max_closes=1)
+        assert (len(collected), skipped, failed, deferred) == (1, 0, 0, 1)
+        assert len(calls) == 2
+
+
+def test_order_batch_rolls_back_if_saved_packet_changes_before_persistence(tmp_path, monkeypatch):
+    from tradebook import coinbase_order_sync
+    packet, orders = fixture()
+    other, other_orders = second_fixture()
+    path = tmp_path / 'book.sqlite3'
+    with connect(path) as db:
+        initialize(db)
+        for p in (packet, other): upsert_packet(db, p)
+    class HTTP:
+        def get(self, route):
+            return {'order': next(o for o in orders + other_orders if route.endswith('/' + o['order_id']))}
+    calls = []
+    def persist(db, *args):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError('saved packet changed during collection')
+        persist_execution(db, *args)
+    monkeypatch.setattr(coinbase_order_sync, 'persist_execution', persist)
+    args = ['--db', str(path), '--market', 'NOL-CDE', '--confirm-live-read', '--confirm-local-import']
+    assert order_sync_main(args, http=HTTP()) == 2
+    with connect(path) as db:
+        assert not db.execute('SELECT * FROM execution_economics').fetchall()
+        assert db.execute('SELECT count(*) FROM source_events').fetchone()[0] == 4

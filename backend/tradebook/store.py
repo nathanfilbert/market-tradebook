@@ -227,3 +227,35 @@ def update_reason(db: sqlite3.Connection, trade_id: str, reason: str | None,
 def backup(db: sqlite3.Connection, target: Path) -> None:
     with sqlite3.connect(target) as destination:
         db.backup(destination)
+
+
+def batch_matches(db: sqlite3.Connection, packets, *, source_key: str, account_id: str,
+                  fills=(), wallet_events=(), wallet_account_id: str | None = None) -> bool:
+    """Read-only no-op check: avoid writes/backups on unchanged scheduled polls."""
+    # A legacy/incomplete database still needs initialization by the write path.
+    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {"trades", "source_events"} <= tables:
+        return False
+    if db.execute("SELECT 1 FROM trades WHERE source_key='mock.tradebook' LIMIT 1").fetchone():
+        raise ValueError("refusing to mix fictional and Coinbase trades")
+    def event_matches(event_id, value):
+        row = db.execute("SELECT raw_json FROM source_events WHERE source_key=? AND account_id=? AND event_id=?",
+                         (source_key, account_id, event_id)).fetchone()
+        return row is not None and row[0] == canonical_json(value)
+    for fill in fills:
+        if not event_matches(json.dumps(["fills", fill["entry_id"]], separators=(",", ":")), fill):
+            return False
+    for event in wallet_events:
+        if not event_matches(json.dumps(["wallet", wallet_account_id, event["id"]], separators=(",", ":")), event):
+            return False
+    for packet in packets:
+        if packet.source_key != source_key or packet.account_id != account_id:
+            raise ValueError("packet account/source mismatch")
+        digest = hashlib.sha256(canonical_json(packet.model_dump(mode="json")).encode()).hexdigest()
+        row = db.execute("SELECT packet_hash FROM trades WHERE id=?", (project(packet)["id"],)).fetchone()
+        if row is None or row[0] != digest:
+            return False
+        for event in packet.source_events:
+            if not event_matches(event.event_id, event.model_dump(mode="json")):
+                return False
+    return True

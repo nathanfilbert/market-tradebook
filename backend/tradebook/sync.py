@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
+from urllib.parse import quote
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .mock import MockSource
 from .source import TradeSource
-from .store import connect, initialize, upsert_packets_and_events, backup
+from .store import connect, initialize, upsert_packets_and_events, backup, batch_matches
 
 DEFAULT_DB = Path.home() / ".local/share/market-tradebook/trades.sqlite3"
 SOURCE_TYPES = ("coinbase-spot", "coinbase-cfm-perpetual", "coinbase-cfm-dated-future")
@@ -37,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="allow verified source-backed closes to write the selected local SQLite file")
     parser.add_argument("--stage-unresolved-events", action="store_true",
                         help="store CFM raw fills only when entry allocation is unverified; emit no close rows")
+    parser.add_argument("--import-verified-closes", action="store_true",
+                        help="import CFM closes with known entry allocations and retain all raw fills")
     parser.add_argument("--db", type=Path, help="explicit SQLite path (required for Coinbase)")
     parser.add_argument("--max-fills", type=int, default=1000, help="maximum accepted history (1..10000)")
     parser.add_argument("--dry-run", action="store_true", help="read and validate without writing records")
@@ -138,7 +142,7 @@ def main(argv=None) -> int:
     if args.source is None:
         parser.error("--source is required (or use --mock)")
     if args.source == "mock":
-        if args.confirm_local_import or args.confirm_live_read or args.stage_unresolved_events:
+        if args.confirm_local_import or args.confirm_live_read or args.stage_unresolved_events or args.import_verified_closes:
             parser.error("Coinbase confirmation flags cannot be used with mock")
         path = args.db or Path(os.environ.get("TRADEBOOK_DB", str(DEFAULT_DB)))
         existed = path.exists()
@@ -157,11 +161,18 @@ def main(argv=None) -> int:
         validate_live_args(args)
         if not args.dry_run and not args.confirm_local_import:
             raise ValueError("Local Coinbase import requires explicit confirmation")
+        if args.import_verified_closes and (args.source == "coinbase-spot" or args.stage_unresolved_events):
+            raise ValueError("verified-close selection requires CFM and cannot use raw-only staging")
         source, packets = _live_source(args)
+        withheld = 0
+        if args.import_verified_closes:
+            verified = [p for p in packets if p.entry_time is not None and p.entry_price is not None]
+            withheld = len(packets) - len(verified)
+            packets = verified
         if args.dry_run:
-            print(f"dry-run: validated {len(packets)} Coinbase close packets; no records written")
+            print(f"dry-run: validated {len(packets)} Coinbase close packets; {withheld} ambiguous closes withheld; no records written")
             return 0
-        if not packets:
+        if not packets and not args.import_verified_closes:
             raise ValueError("no source-backed close packets to import")
         unknown_cfm_entry = (args.source != "coinbase-spot" and
                              any(p.entry_time is None or p.entry_price is None for p in packets))
@@ -169,9 +180,21 @@ def main(argv=None) -> int:
             raise ValueError("raw-only staging is reserved for unverified CFM entry allocations")
         if unknown_cfm_entry and not args.stage_unresolved_events:
             raise ValueError("CFM close entry allocation cannot be verified for persistent import")
-        if args.db.resolve() == DEFAULT_DB.resolve():
+        args.db = args.db.expanduser().resolve()
+        if args.db == DEFAULT_DB.resolve():
             raise ValueError("Coinbase import requires a separate explicit database")
+        fills = getattr(source, "_fills", ())
+        wallet_events = getattr(source, "_wallet_events", ())
+        wallet_account_id = getattr(source, "wallet_account_id", None)
+        selected = [] if args.stage_unresolved_events else packets
+        batch = dict(source_key=source.source_key, account_id=source.account_id,
+                     fills=fills, wallet_events=wallet_events, wallet_account_id=wallet_account_id)
         existed = args.db.exists()
+        if existed:
+            with sqlite3.connect("file:" + quote(str(args.db)) + "?mode=ro", uri=True) as reader:
+                if batch_matches(reader, selected, **batch):
+                    print(f"unchanged: {len(selected)} Coinbase closes; {withheld} ambiguous closes withheld")
+                    return 0
         db = connect(str(args.db))
         try:
             db.execute("PRAGMA foreign_keys=ON")
@@ -192,7 +215,8 @@ def main(argv=None) -> int:
                                           account_id=source.account_id, fills=fills)
                 print(f"staged {len(fills)} Coinbase source fills; no close rows published")
             else:
-                print(f"synced {sync(db, source)} Coinbase close packets")
+                count = upsert_packets_and_events(db, selected, **batch)
+                print(f"synced {count} Coinbase close packets; {withheld} ambiguous closes withheld")
             db_path = args.db
             db_path.chmod(0o600)
         finally:

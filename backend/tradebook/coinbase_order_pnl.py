@@ -112,31 +112,84 @@ def persist_execution(db: sqlite3.Connection, trade_id: str, packet: ClosedTrade
         raise
 
 
-def collect_saved_executions(db: sqlite3.Connection, markets: list[str], http):
-    """Read only selected saved closes and their exact historical orders."""
-    if not markets or len(set(markets)) != len(markets):
-        raise ValueError("select distinct markets")
-    collected = []
-    for market in markets:
-        if not isinstance(market, str) or not market:
-            raise ValueError("invalid market")
-        rows = db.execute("SELECT id, packet_json FROM trades WHERE market=? AND source_key LIKE 'coinbase.cfm.%'",
-                          (market,)).fetchall()
-        if len(rows) != 1:
-            raise ValueError("selected market must have exactly one saved CFM close")
-        row = rows[0]
-        packet = ClosedTradePacket.model_validate_json(row["packet_json"])
-        if len(packet.source_events) != 2:
-            raise ValueError("requires exactly two source fills")
-        orders = []
-        for event in packet.source_events:
-            order_id = event.payload.get("order_id")
-            if (not isinstance(order_id, str) or not order_id or order_id in {".", ".."}
-                    or quote(order_id, safe="") != order_id):
-                raise ValueError("invalid source order ID")
+def _collect_execution(db, packet: ClosedTradePacket, http, cache: dict):
+    """Read exact source order IDs and refuse conflicts with immutable saved evidence."""
+    orders = []
+    if len(packet.source_events) != 2:
+        raise ValueError("requires exactly two source fills")
+    for event in packet.source_events:
+        order_id = event.payload.get("order_id")
+        if (not isinstance(order_id, str) or not order_id or order_id in {".", ".."}
+                or quote(order_id, safe="") != order_id):
+            raise ValueError("invalid source order ID")
+        if order_id not in cache:
             response = http.get("/api/v3/brokerage/orders/historical/" + order_id)
             if not isinstance(response, dict) or not isinstance(response.get("order"), dict):
                 raise ValueError("invalid historical order response")
-            orders.append(response["order"])
-        collected.append((row["id"], packet, orders, calculate_execution(packet, orders)))
+            cache[order_id] = response["order"]
+        order = cache[order_id]
+        old = db.execute("SELECT raw_json FROM source_events WHERE source_key=? AND account_id=? AND event_id=?",
+                         (packet.source_key, packet.account_id,
+                          json.dumps(["orders", order_id], separators=(",", ":")))).fetchone()
+        if old and old[0] != canonical_json(order):
+            raise ValueError("Coinbase order evidence changed")
+        orders.append(order)
+    return orders, calculate_execution(packet, orders)
+
+
+def collect_saved_executions(db: sqlite3.Connection, markets: list[str], http):
+    """Strict manual collection: every saved close in selected markets must reconcile."""
+    if not markets or len(set(markets)) != len(markets):
+        raise ValueError("select distinct markets")
+    collected = []
+    cache = {}
+    for market in markets:
+        if not isinstance(market, str) or not market:
+            raise ValueError("invalid market")
+        rows = db.execute("SELECT id, packet_json FROM trades WHERE market=? AND source_key LIKE 'coinbase.cfm.%' ORDER BY close_time DESC, id",
+                          (market,)).fetchall()
+        if not rows:
+            raise ValueError("selected market has no saved CFM closes")
+        for row in rows:
+            packet = ClosedTradePacket.model_validate_json(row["packet_json"])
+            orders, result = _collect_execution(db, packet, http, cache)
+            collected.append((row["id"], packet, orders, result))
     return collected
+
+
+def collect_pending_executions(db: sqlite3.Connection, markets: list[str], account_id: str,
+                               http, *, max_closes: int = 100):
+    """Bounded automatic enrichment, isolating unavailable/mismatched closes.
+
+    Already enriched rows need no new order reads. Source replay clears enrichment
+    when its packet changes. Partial allocations never use whole-order values.
+    """
+    if not account_id or not markets or len(set(markets)) != len(markets) or not 1 <= max_closes <= 1000:
+        raise ValueError("explicit account, distinct markets and bounded closes required")
+    collected, skipped, failed, deferred, attempted = [], 0, 0, 0, 0
+    cache = {}
+    for market in markets:
+        rows = db.execute(
+            "SELECT t.id,t.packet_json FROM trades t LEFT JOIN execution_economics e ON e.trade_id=t.id "
+            "WHERE t.market=? AND t.account_id=? AND t.source_key LIKE 'coinbase.cfm.%' AND e.trade_id IS NULL "
+            "ORDER BY t.close_time DESC,t.id", (market, account_id)).fetchall()
+        for row in rows:
+            try:
+                packet = ClosedTradePacket.model_validate_json(row["packet_json"])
+                if (packet.price_currency != "USD" or packet.entry_time is None or packet.entry_price is None
+                        or packet.exit_price is None or packet.fee_usd is None or not packet.fee_currency_assumed
+                        or len(packet.source_events) != 2
+                        or any(_decimal(e.payload.get("size"), positive=True) != packet.closed_quantity
+                               for e in packet.source_events)):
+                    skipped += 1
+                    continue
+                if attempted >= max_closes:
+                    deferred += 1
+                    continue
+                attempted += 1
+                orders, result = _collect_execution(db, packet, http, cache)
+                collected.append((row["id"], packet, orders, result))
+            except Exception:
+                # Never expose dependency exception text, credentials or raw payloads.
+                failed += 1
+    return collected, skipped, failed, deferred

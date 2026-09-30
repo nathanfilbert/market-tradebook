@@ -65,3 +65,56 @@ cd backend
 ```
 
 Full backend and frontend verification commands are listed in the repository README. Tests are local fixture/fake-based; no Coinbase network request is part of the test command.
+
+
+## Selective recurring capture (2026-09-30)
+
+The explicit CFM `--import-verified-closes` mode retains the full fetched raw fill
+history but publishes only allocations with known entry time and price. This
+removes the whole-product block caused solely by older unknown-basis closes;
+malformed events, ambiguous reversals, source drift and identity failures still
+refuse the product batch. The existing raw-only staging option remains separate.
+No multiplier, funding or settled P/L is inferred by this selection.
+
+The live read-only BIP-20DEC30-CDE probe returned CFM-managed EXPIRING metadata and
+32 fills, including the September 30 buy at 12:51:52 UTC and sell at 13:38:05 UTC.
+That pair has a matched entry; two older allocations in the saved history have
+unknown entry basis. Earlier descriptions of the persistent multi-entry block now
+apply to the default strict CLI mode; selective mode withholds those allocations
+and imports the other matched closes.
+
+The opt-in systemd timer runs explicit local source selections every five minutes
+following completion. It uses bounded read-only requests, a non-overlapping lock,
+atomic per-product staging/projection, change-only backups and sanitized journal
+status. It does not expand product coverage. After successful CFM capture it now enriches eligible pending closes as described below.
+
+
+## Per-close execution enrichment (2026-09-30)
+
+Recurring capture now follows each successful configured CFM product import with
+account-scoped enrichment of its pending saved closes. It supports multiple closes
+per market, reads exact historical order IDs, and validates account, product, side,
+filled quantity, average price, single-fill completion, commission, after-fees
+arithmetic and consistent order-value scaling before publishing values. Partial
+allocations cannot receive whole-order exposure or P/L.
+
+Each pass attempts at most 100 candidate closes per product, reports unsupported,
+failed and deferred counts, and can save verified candidates even if another
+candidate fails. Already enriched rows require no fresh order requests; source
+packet changes invalidate the separate calculation during fill replay. Changed
+immutable order evidence is refused. The collected valid updates are backed up and
+written in an explicit atomic transaction that rechecks saved packet hashes.
+
+Exposure is entry order `filled_value`, gross is the direction-adjusted difference
+of entry/exit values, and execution net uses their after-fees values. No funding,
+settlement or Coinbase-reported realized P/L is inferred. Reasons remain unchanged.
+
+
+Live verification enriched all 14 saved BIP closes without changing the existing
+NOL/BCP calculations or any reason revisions. All 16 saved rows now expose entry
+notional and order-derived execution gross/net-after-fees; full net including
+funding remains unavailable. The September 30 BIP close has 853.70 USD entry
+exposure, -9.00 USD execution gross and -10.9384 USD net after trading fees.
+Backend regression coverage passed 188 tests, including multi-close selection,
+account isolation, partial-allocation refusal, bounded reads, no-op replay and
+atomic rollback; database integrity, foreign keys and live API readback passed.
