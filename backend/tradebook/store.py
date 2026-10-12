@@ -53,6 +53,9 @@ def initialize(db: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS reason_history (
           trade_id TEXT NOT NULL REFERENCES trades(id), revision INTEGER NOT NULL,
           reason TEXT, edited_at TEXT NOT NULL, PRIMARY KEY(trade_id, revision));
+        CREATE TABLE IF NOT EXISTS exit_reason_history (
+          trade_id TEXT NOT NULL REFERENCES trades(id), revision INTEGER NOT NULL,
+          exit_reason TEXT, edited_at TEXT NOT NULL, PRIMARY KEY(trade_id, revision));
         CREATE TABLE IF NOT EXISTS notes_history (
           trade_id TEXT NOT NULL REFERENCES trades(id), revision INTEGER NOT NULL,
           notes TEXT, edited_at TEXT NOT NULL, PRIMARY KEY(trade_id, revision));
@@ -70,6 +73,11 @@ def initialize(db: sqlite3.Connection) -> None:
 
         if "notes_revision" not in existing:
             db.execute("ALTER TABLE trades ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0")
+        # Each exit row's own exit reason (the entry reason is shared per position; see position_reasons).
+        if "exit_reason" not in existing:
+            db.execute("ALTER TABLE trades ADD COLUMN exit_reason TEXT")
+        if "exit_reason_revision" not in existing:
+            db.execute("ALTER TABLE trades ADD COLUMN exit_reason_revision INTEGER NOT NULL DEFAULT 0")
         from .positions import initialize_positions
         from .lifecycle_reasons import initialize_reasons
         initialize_positions(db)
@@ -248,6 +256,27 @@ def update_notes(db: sqlite3.Connection, trade_id: str, notes: str | None,
             raise ValueError("revision conflict")
         db.execute("INSERT INTO notes_history VALUES (?, ?, ?, ?)",
                    (trade_id, expected_revision + 1, notes, datetime.now(timezone.utc).isoformat()))
+    return get_trade(db, trade_id)
+
+
+def update_exit_reason(db: sqlite3.Connection, trade_id: str, exit_reason: str | None,
+                       expected_revision: int) -> dict | None:
+    """Compare-and-set one exit row's exit reason; blank is a deliberate clear (a new revision)."""
+    if exit_reason is not None and not isinstance(exit_reason, str):
+        raise ValueError("exit reason must be text or null")
+    exit_reason = (exit_reason.strip() or None) if exit_reason is not None else None
+    if exit_reason is not None and len(exit_reason) > 4000:
+        raise ValueError("exit reason too long")
+    with db:
+        changed = db.execute(
+            "UPDATE trades SET exit_reason=?, exit_reason_revision=exit_reason_revision+1 "
+            "WHERE id=? AND exit_reason_revision=?", (exit_reason, trade_id, expected_revision))
+        if changed.rowcount == 0:
+            if get_trade(db, trade_id) is None:
+                return None
+            raise ValueError("revision conflict")
+        db.execute("INSERT INTO exit_reason_history VALUES (?, ?, ?, ?)",
+                   (trade_id, expected_revision + 1, exit_reason, datetime.now(timezone.utc).isoformat()))
     return get_trade(db, trade_id)
 
 
