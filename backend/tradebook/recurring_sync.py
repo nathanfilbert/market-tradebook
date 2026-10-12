@@ -4,12 +4,46 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .sync import DEFAULT_DB, SOURCE_TYPES, main as sync_main
 from .coinbase_order_sync import main as order_sync_main
 
 MAX_SOURCE_SELECTIONS = 32
+
+
+def status_path(db: Path) -> Path:
+    return db.with_suffix(db.suffix + ".sync-status.json")
+
+
+def read_sync_status(db: Path) -> dict:
+    """Last completed fills read per (portfolio, product); empty when never recorded."""
+    try:
+        value = json.loads(status_path(Path(db)).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("selections"), dict):
+        return {}
+    return value["selections"]
+
+
+def record_sync_status(db: Path, portfolio_id: str, product_id: str, ok: bool) -> None:
+    """Atomically note that a full fills read for one selection finished (ok or not)."""
+    selections = read_sync_status(db)
+    key = f"{portfolio_id}|{product_id}"
+    now = datetime.now(timezone.utc).isoformat()
+    entry = dict(selections.get(key) or {})
+    entry.update({"last_attempt_at": now, "last_attempt_ok": ok})
+    if ok:
+        entry["last_ok_at"] = now
+    selections[key] = entry
+    target = status_path(db)
+    temporary = target.with_name(target.name + ".tmp")
+    temporary.write_text(json.dumps({"version": 1, "selections": selections}, sort_keys=True))
+    temporary.chmod(0o600)
+    os.replace(temporary, target)
 
 
 def load_config(path: Path) -> tuple[Path, int, list[dict]]:
@@ -82,7 +116,10 @@ def run_sources(db: Path, maximum: int, sources: list[dict], *, dry_run: bool) -
         if source["source"] != "coinbase-spot":
             args.append("--import-verified-closes")
         print(f"syncing {source['product_id']}", flush=True)
-        if sync_main(args) != 0:
+        ok = sync_main(args) == 0
+        if not dry_run:
+            record_sync_status(db, source["portfolio_id"], source["product_id"], ok)
+        if not ok:
             failed = True
             continue
         if source["source"] != "coinbase-spot" and db.is_file():

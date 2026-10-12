@@ -186,7 +186,9 @@ service. Stop capture with `systemctl --user disable --now market-tradebook-sync
 (and stop the sync service if a run is already active).
 
 Changed imports receive timestamped SQLite backups before atomic writes. Unchanged
-polls perform no writes or backups. History is bounded by `max_fills`; exceeding it
+polls perform no database writes or backups; each non-dry-run selection only updates
+the owner-readable `<db>.sync-status.json` (last attempt and last successful fills read),
+which the lifecycle API uses for freshness. History is bounded by `max_fills`; exceeding it
 fails rather than silently truncating and requires review. New markets require a
 configuration update. Reload the browser to see newly imported closes; the frontend
 does not poll the API automatically. After each successful CFM capture, recurring sync enriches eligible saved closes
@@ -212,3 +214,25 @@ retry of pending closes, use:
 Replace `--dry-run` with `--confirm-local-import` to persist verified candidates.
 Without `--pending-only`, the manual command requires every selected close to
 validate and imports the selected batch atomically.
+
+## Position lifecycles (read only)
+
+`tradebook.lifecycles` replays saved CFM fills per exact source, account and product
+into position lifecycles: one position from a proven flat point back to flat. Adds and
+partial closes stay in one lifecycle; a reversal fill is split exactly, with its
+commission shared pro rata. Lifecycles are computed on read and never stored, so
+replays are identical and nothing in the database changes.
+
+A replay starts only at evidence that the product was flat. A calculated return to
+zero from an unknown start is not that evidence, and no evidence source is wired up
+yet, so `GET /api/lifecycles` reports every product as `unavailable` and lists no open
+position. After a flat point, corrections and other non-fill events, account or field
+mismatches, a close with nothing open, or same-time fills in both directions mark the
+product `unresolved` until the next flat point.
+
+- `GET /api/lifecycles?status=open|closed|unresolved`: lifecycles plus every product's
+  status, reason and freshness (`fresh` within 15 minutes of the last successful fills
+  read, otherwise `stale`, or `unavailable` when never recorded).
+- `GET /api/lifecycles/{id}`: fills with roles, and the closed trades linked to it.
+- Trades gain `lifecycle`: an exact link (every fill of the close maps to one
+  lifecycle) or `{"unresolved": why}`. Existing trade IDs, reasons and notes are unchanged.
