@@ -70,6 +70,10 @@ def initialize(db: sqlite3.Connection) -> None:
 
         if "notes_revision" not in existing:
             db.execute("ALTER TABLE trades ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0")
+        from .positions import initialize_positions
+        from .lifecycle_reasons import initialize_reasons
+        initialize_positions(db)
+        initialize_reasons(db)
 
 
 _UNSET_CURSOR = object()

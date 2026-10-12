@@ -186,7 +186,9 @@ service. Stop capture with `systemctl --user disable --now market-tradebook-sync
 (and stop the sync service if a run is already active).
 
 Changed imports receive timestamped SQLite backups before atomic writes. Unchanged
-polls perform no writes or backups. History is bounded by `max_fills`; exceeding it
+polls perform no database writes or backups; each non-dry-run selection only updates
+the owner-readable `<db>.sync-status.json` (last attempt and last successful fills read),
+which the lifecycle API uses for freshness. History is bounded by `max_fills`; exceeding it
 fails rather than silently truncating and requires review. New markets require a
 configuration update. Reload the browser to see newly imported closes; the frontend
 does not poll the API automatically. After each successful CFM capture, recurring sync enriches eligible saved closes
@@ -216,3 +218,61 @@ validate and imports the selected batch atomically.
 ## Entry Reason and Notes
 
 Select a trade to edit Entry Reason or Notes, then use the corresponding save button. Both fields are optional user-entered text (up to 4,000 characters each), stored locally with independent edit histories. Coinbase imports never populate them and replay preserves them. Existing databases automatically gain blank notes when opened by the updated backend.
+
+## Position lifecycles and entry reasons
+
+`tradebook.lifecycles` replays saved CFM fills per exact source, account and product
+into position lifecycles: one position from a proven flat point back to flat. Adds and
+partial closes stay in one lifecycle; a reversal fill is split exactly, with its
+commission shared pro rata. Lifecycles are computed on read and never stored.
+
+**Flat points come only from Coinbase positions snapshots taken after forward tracking
+is enabled.** A calculated return to zero is never a flat point, and a snapshot is
+current evidence only: history before tracking stays unattributed.
+`tradebook.positions` reads the full fills history, then
+`GET /api/v3/brokerage/cfm/positions`, then the fills again, after checking with
+`GET /api/v3/brokerage/key_permissions` that the existing view key belongs to the
+configured portfolio, and checking every selected product's own Coinbase metadata
+(`GET /api/v3/brokerage/products/{id}`): a product that Coinbase does not classify as
+the selected CFM family (spot, the other CFM family, not FCM-managed) is refused before
+anything is read or saved. Only the two new read routes were added to the transport
+allowlist. A snapshot counts only when both fills reads match, and for each product
+only when no fill lies within 10 seconds of the positions request. A flat snapshot
+starts or restarts a replay; a non-zero one must equal the replayed position.
+
+Enable tracking once per portfolio (writes the database; requires review first):
+
+```bash
+.venv/bin/python -m tradebook.positions --db ~/.local/share/market-tradebook/coinbase.sqlite3 \
+  --portfolio-id <portfolio> --product coinbase.cfm.dated_future:<PRODUCT> ... \
+  --confirm-live-read --confirm-local-import --enable-tracking
+```
+
+After that, each recurring run takes one snapshot per tracked portfolio after its fills
+pass. Until then nothing reads positions and every product reports `unavailable`.
+
+A product is `unresolved` until its next flat snapshot when a snapshot disagrees with
+the fills, a contract is past its expiry with a position open (settlement is not a
+fill), a non-FILL event appears (corrections, reversals and any other type), account or
+field data mismatch, a close has nothing open, or same-time fills go both ways. A
+position Coinbase reports in a product whose fills are not synced is listed as
+unresolved too.
+
+- `GET /api/lifecycles?status=open|closed|unresolved`: lifecycles with `display`
+  (`confirmed` when a fresh snapshot agrees after the last fill, `pending_check` when a
+  fill is newer than the last snapshot, `stale` when fills or positions are over 15
+  minutes old or the last read failed), every product's status, and detached reasons.
+- `GET /api/lifecycles/{id}`: fills with roles, linked closed trades and the entry reason.
+  `open_average_entry` is the average cost of the contracts still open (closes remove
+  their share at the running average); `lifetime_average_entry` averages every opening
+  fill. Both are calculated from fills, not Coinbase's own figure.
+- `PATCH /api/lifecycles/{id}/reason` with `expected_revision` (409 on conflict or for an
+  unresolved lifecycle). A null, empty or whitespace-only reason is a deliberate clear and
+saves a new revision (text is trimmed); `entry_reason.state` is `set`,
+  `cleared` or `none` from the revision, not from the text.
+- Trades gain `lifecycle`: an exact link with the lifecycle's `entry_reason`, or
+  `{"unresolved": why}`. Links need every fill of the close to map to one lifecycle, and
+  linked closes together may not exceed the fills' closing or opening quantity. Trade
+  IDs, trade reasons and notes are never changed or copied.
+- A reason whose lifecycle stops appearing after a replay is kept and listed under
+  `detached_reasons`; it is never moved automatically.
