@@ -241,11 +241,19 @@ def test_spot_rows_are_not_projected(db):
     assert project(db, (baseline(),)).scopes == ()
 
 
+def ensure_notes_columns(db):
+    """The deployed notes schema, added only where this checkout's initialize() lacks it."""
+    have = {c[1] for c in db.execute("PRAGMA table_info(trades)")}
+    if "notes" not in have:
+        db.execute("ALTER TABLE trades ADD COLUMN notes TEXT")
+    if "notes_revision" not in have:
+        db.execute("ALTER TABLE trades ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0")
+    db.execute("CREATE TABLE IF NOT EXISTS notes_history (trade_id TEXT, revision INTEGER, notes TEXT, edited_at TEXT)")
+
+
 def test_deployed_notes_columns_are_compatible(db):
     # The running checkout adds notes, notes_revision and notes_history; lifecycles must not care.
-    db.execute("ALTER TABLE trades ADD COLUMN notes TEXT")
-    db.execute("ALTER TABLE trades ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0")
-    db.execute("CREATE TABLE notes_history (trade_id TEXT, revision INTEGER, notes TEXT, edited_at TEXT)")
+    ensure_notes_columns(db)
     save(db, [fill("a", "BUY", 1, 1), fill("b", "SELL", 1, 2)])
     db.execute("UPDATE trades SET notes='kept', notes_revision=1")
     result = project(db, (baseline(),))

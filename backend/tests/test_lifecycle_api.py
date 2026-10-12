@@ -9,7 +9,7 @@ from tradebook.api import create_app
 from tradebook.domain import ClosedTradePacket
 from tradebook.lifecycles import lifecycle_id
 from tradebook.store import connect, initialize, upsert_packet
-from test_lifecycles import ACCOUNT, PRODUCT, SOURCE, fill, save
+from test_lifecycles import ACCOUNT, PRODUCT, SOURCE, ensure_notes_columns, fill, save
 from test_positions import T0, position, take
 
 LC_S = lifecycle_id(SOURCE, ACCOUNT, PRODUCT, "s")
@@ -128,7 +128,7 @@ def test_closed_trade_shows_linked_reason_without_copying_it(tmp_path):
     api = client(path, 50)
     api.patch(f"/api/lifecycles/{LC_S}/reason", json={"reason": "fade the pop", "expected_revision": 0})
     with connect(path) as db:
-        db.execute("ALTER TABLE trades ADD COLUMN notes TEXT")
+        ensure_notes_columns(db)
         db.execute("UPDATE trades SET notes='desk-independent note'")
     (trade,) = api.get("/api/trades").json()["items"]
     assert trade["reason"] is None and trade["reason_revision"] == 0 and trade["notes"] == "desk-independent note"
