@@ -12,7 +12,7 @@ const trade: api.Trade = { id: 't1', source_key: 'mock.spot', account_id: 'demo'
   position_notional_usd: '6000', gross_pnl_usd: '200', fee_usd: '12', funding_usd: '0',
   net_pnl_usd: '188', reported_gross_usd: null, reported_net_usd: null,
   reconciliation_status: 'not_available',
-  reason: null, reason_revision: 0 }
+  reason: null, reason_revision: 0, notes: null, notes_revision: 0 }
 
 it('shows a spreadsheet of trades with two-decimal position and fee displays', async () => {
   vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [{ ...trade,
@@ -194,4 +194,33 @@ it('does not attribute a late save to a newly selected trade', async () => {
   await act(async () => resolveSave({ ...trade, reason: 'BTC thesis', reason_revision: 1 }))
   expect((screen.getByLabelText('Entry reason') as HTMLTextAreaElement).value).toBe('ETH thesis')
   expect(screen.queryByText('Reason saved.')).toBeNull()
+})
+
+it('saves notes independently and shows them on reopening the trade', async () => {
+  vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [trade], has_more: false })
+  const save = vi.spyOn(api, 'saveNotes').mockResolvedValue({ ...trade, notes: 'Review\nBe patient', notes_revision: 1 })
+  const reasonSave = vi.spyOn(api, 'saveReason')
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Open details for BTC-USD' }))
+  fireEvent.change(screen.getByLabelText('Entry reason'), { target: { value: 'Unsaved thesis' } })
+  fireEvent.change(screen.getByLabelText('Notes'), { target: { value: 'Review\nBe patient' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save notes' }))
+  expect(await screen.findByText('Notes saved.')).toBeTruthy()
+  expect(save).toHaveBeenCalledWith('t1', 'Review\nBe patient', 0)
+  expect(reasonSave).not.toHaveBeenCalled()
+  expect((screen.getByLabelText('Entry reason') as HTMLTextAreaElement).value).toBe('Unsaved thesis')
+  fireEvent.click(screen.getByRole('button', { name: 'Close details' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Open details for BTC-USD' }))
+  expect((screen.getByLabelText('Notes') as HTMLTextAreaElement).value).toBe('Review\nBe patient')
+})
+
+it('keeps the notes draft after a failed save', async () => {
+  vi.spyOn(api, 'fetchTrades').mockResolvedValue({ items: [trade], has_more: false })
+  vi.spyOn(api, 'saveNotes').mockRejectedValue(new Error('conflict'))
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Open details for BTC-USD' }))
+  fireEvent.change(screen.getByLabelText('Notes'), { target: { value: 'Keep this draft' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save notes' }))
+  expect(await screen.findByText(/Could not save notes/)).toBeTruthy()
+  expect((screen.getByLabelText('Notes') as HTMLTextAreaElement).value).toBe('Keep this draft')
 })

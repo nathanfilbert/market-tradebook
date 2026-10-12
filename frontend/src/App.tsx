@@ -1,6 +1,6 @@
 // frontend/src/App.tsx
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { fetchTrades, saveReason, type Trade } from './api'
+import { fetchTrades, saveReason, saveNotes, type Trade } from './api'
 import './App.css'
 const money = (value: string | null) => value === null ? '—' :
   new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value))
@@ -16,6 +16,7 @@ export default function App() {
   const closeButton = useRef<HTMLButtonElement | null>(null)
   const openedFrom = useRef<HTMLButtonElement | null>(null)
   const [reason, setReason] = useState('')
+  const [notes, setNotes] = useState('')
   const [query, setQuery] = useState('')
   const [recentOnly, setRecentOnly] = useState(true)
   const generation = useRef(0)
@@ -26,7 +27,8 @@ export default function App() {
   const [status, setStatus] = useState('Loading trades…')
   const [saving, setSaving] = useState(false)
   const active = trades.find(t => t.id === selected)
-  const reasonStatus = status === 'Reason saved.' || status.startsWith('Could not save reason.')
+  const reasonStatus = status === 'Reason saved.' || status.startsWith('Could not save reason.') ||
+    status === 'Notes saved.' || status.startsWith('Could not save notes.')
   const visible = useMemo(() => trades.filter(t =>
     `${t.market} ${t.product_type} ${t.source_key}`.toLowerCase().includes(query.toLowerCase())), [trades, query])
   const visiblePnl = useMemo(() => {
@@ -44,7 +46,7 @@ export default function App() {
       setTrades(page.items); setHasMore(page.has_more)
       offset.current = page.items.length
       selectedRef.current = null
-      setSelected(null); setReason('')
+      setSelected(null); setReason(''); setNotes('')
       setStatus(page.items.length ? '' : 'No captured trades in this view.')
     }).catch(() => { if (!cancelled) setStatus('Could not load trades.') })
     return () => { cancelled = true }
@@ -54,7 +56,7 @@ export default function App() {
     generation.current += 1
     loadingMore.current = false; setLoadingMoreView(false)
     setTrades([]); setHasMore(false); setSelected(null); selectedRef.current = null
-    setReason(''); offset.current = 0; setStatus('Loading trades…')
+    setReason(''); setNotes(''); offset.current = 0; setStatus('Loading trades…')
     setRecentOnly(value => !value)
   }
   async function more() {
@@ -77,30 +79,30 @@ export default function App() {
   }
   function choose(t: Trade) {
     openedFrom.current = document.getElementById(`trade-${t.id}`) as HTMLButtonElement | null
-    selectedRef.current = t.id; setSelected(t.id); setReason(t.reason ?? ''); setStatus('')
+    selectedRef.current = t.id; setSelected(t.id); setReason(t.reason ?? ''); setNotes(t.notes ?? ''); setStatus('')
   }
   function closeDetails() {
-    selectedRef.current = null; setSelected(null); setReason('')
+    selectedRef.current = null; setSelected(null); setReason(''); setNotes('')
     openedFrom.current?.focus()
   }
-  async function submit() {
+  async function submit(field: 'reason' | 'notes' = 'reason') {
     if (!active) return
     const tradeId = active.id
-    const revision = active.reason_revision
-    const draft = reason
+    const revision = field === 'reason' ? active.reason_revision : active.notes_revision
+    const draft = field === 'reason' ? reason : notes
     setSaving(true); setStatus('')
     try {
-      const saved = await saveReason(tradeId, draft, revision)
+      const saved = await (field === 'reason' ? saveReason : saveNotes)(tradeId, draft, revision)
       setTrades(items => items.map(t => t.id === saved.id ? saved : t))
-      if (selectedRef.current === tradeId) setStatus('Reason saved.')
+      if (selectedRef.current === tradeId) setStatus(field === 'reason' ? 'Reason saved.' : 'Notes saved.')
     } catch {
-      if (selectedRef.current === tradeId) setStatus('Could not save reason. Reload before retrying if the record changed.')
+      if (selectedRef.current === tradeId) setStatus(`Could not save ${field}. Reload before retrying if the record changed.`)
     }
     finally { setSaving(false) }
   }
   return <main className="shell">
     <header className="topbar"><div><p className="eyebrow">COINBASE · CAPTURE ONLY</p><h1>Tradebook</h1>
-      <p className="subtitle">A clear view of your closed trades. Select a row for details and your reason.</p></div>
+      <p className="subtitle">A clear view of your closed trades. Select a row for details, your entry reason and notes.</p></div>
     </header>
     <section className="pnl-summary" aria-label="Visible total profit and loss">
       <span className="pnl-summary-label">VISIBLE TOTAL P/L</span>
@@ -119,7 +121,7 @@ export default function App() {
         <th scope="col" className="numeric">Exposure</th><th scope="col" className="numeric">Entry</th>
         <th scope="col" className="numeric">Exit</th><th scope="col" className="numeric">Gross P/L</th>
         <th scope="col" className="numeric">Fees</th><th scope="col" className="numeric">Net P/L</th>
-        <th scope="col">Entry reason</th></tr></thead><tbody>
+        <th scope="col">Entry reason</th><th scope="col">Notes</th></tr></thead><tbody>
       {visible.map(t => <tr key={t.id} className={t.id === selected ? 'selected' : ''} onClick={() => choose(t)}>
         <td><button id={`trade-${t.id}`} className="market-button" onClick={() => choose(t)} aria-label={`Open details for ${t.market}`}>{t.market}</button></td>
         <td className="date-cell">{new Date(t.close_time).toLocaleDateString()}</td>
@@ -132,6 +134,7 @@ export default function App() {
         <td className={`numeric ${(t.execution_net_pnl_usd ?? t.net_pnl_usd) === null ? 'muted' : Number(t.execution_net_pnl_usd ?? t.net_pnl_usd) < 0 ? 'negative' : 'positive'}`}>
           {money(t.execution_net_pnl_usd ?? t.net_pnl_usd)}{t.pnl_method === 'coinbase_orders_ex_funding' ? <span title="Calculated net after fees, excluding funding and settlement">†</span> : null}</td>
         <td className="reason-cell" title={t.reason ?? ''}>{t.reason || '—'}</td>
+        <td className="reason-cell" title={t.notes ?? ''}>{t.notes || '—'}</td>
       </tr>)}
       </tbody></table></div>
       {trades.length > 0 && visible.length === 0 && <p className="sheet-message">No matching trades.</p>}
@@ -162,7 +165,9 @@ export default function App() {
         <dt>Source-reported net</dt><dd>{money(active.reported_net_usd)}</dd>
         <dt>Reconciliation</dt><dd>{active.reconciliation_status.replaceAll('_', ' ')}</dd>
       </dl><label>Entry reason<textarea value={reason} onChange={e => setReason(e.target.value)} maxLength={4000} /></label>
-      <button className="primary-button" onClick={submit} disabled={saving}>Save reason</button>
+      <button className="primary-button" onClick={() => submit('reason')} disabled={saving}>Save reason</button>
+      <label className="notes-label">Notes<textarea value={notes} onChange={e => setNotes(e.target.value)} maxLength={4000} /></label>
+      <button className="primary-button" onClick={() => submit('notes')} disabled={saving}>Save notes</button>
       {reasonStatus && <p role="status" className="detail-status">{status}</p>}
     </aside>}
   </main>

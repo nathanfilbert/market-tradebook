@@ -4,12 +4,50 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .sync import DEFAULT_DB, SOURCE_TYPES, main as sync_main
 from .coinbase_order_sync import main as order_sync_main
+from .positions import main as positions_main, readonly, tracking_enabled
+
+CFM_SOURCE_KEYS = {"coinbase-cfm-perpetual": "coinbase.cfm.us_perpetual",
+                   "coinbase-cfm-dated-future": "coinbase.cfm.dated_future"}
 
 MAX_SOURCE_SELECTIONS = 32
+
+
+def status_path(db: Path) -> Path:
+    return db.with_suffix(db.suffix + ".sync-status.json")
+
+
+def read_sync_status(db: Path) -> dict:
+    """Last completed fills read per (portfolio, product); empty when never recorded."""
+    try:
+        value = json.loads(status_path(Path(db)).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("selections"), dict):
+        return {}
+    return value["selections"]
+
+
+def record_sync_status(db: Path, portfolio_id: str, product_id: str, ok: bool) -> None:
+    """Atomically note that a full fills read for one selection finished (ok or not)."""
+    selections = read_sync_status(db)
+    key = f"{portfolio_id}|{product_id}"
+    now = datetime.now(timezone.utc).isoformat()
+    entry = dict(selections.get(key) or {})
+    entry.update({"last_attempt_at": now, "last_attempt_ok": ok})
+    if ok:
+        entry["last_ok_at"] = now
+    selections[key] = entry
+    target = status_path(db)
+    temporary = target.with_name(target.name + ".tmp")
+    temporary.write_text(json.dumps({"version": 1, "selections": selections}, sort_keys=True))
+    temporary.chmod(0o600)
+    os.replace(temporary, target)
 
 
 def load_config(path: Path) -> tuple[Path, int, list[dict]]:
@@ -82,7 +120,10 @@ def run_sources(db: Path, maximum: int, sources: list[dict], *, dry_run: bool) -
         if source["source"] != "coinbase-spot":
             args.append("--import-verified-closes")
         print(f"syncing {source['product_id']}", flush=True)
-        if sync_main(args) != 0:
+        ok = sync_main(args) == 0
+        if not dry_run:
+            record_sync_status(db, source["portfolio_id"], source["product_id"], ok)
+        if not ok:
             failed = True
             continue
         if source["source"] != "coinbase-spot" and db.is_file():
@@ -91,7 +132,38 @@ def run_sources(db: Path, maximum: int, sources: list[dict], *, dry_run: bool) -
                                "--confirm-live-read", "--dry-run" if dry_run else "--confirm-local-import"]
             if order_sync_main(enrichment_args) != 0:
                 failed = True
+    if not dry_run and not snapshot_positions(db, maximum, sources):
+        failed = True
     return 2 if failed else 0
+
+
+def snapshot_positions(db: Path, maximum: int, sources: list[dict]) -> bool:
+    """After the fills pass, take one bracketed positions snapshot per tracked portfolio."""
+    portfolios = {}
+    for source in sources:
+        if source["source"] in CFM_SOURCE_KEYS:
+            portfolios.setdefault(source["portfolio_id"], []).append(
+                f"{CFM_SOURCE_KEYS[source['source']]}:{source['product_id']}")
+    ok = True
+    for portfolio_id, products in sorted(portfolios.items()):
+        if not db.is_file():
+            continue
+        reader = readonly(db)
+        try:
+            enabled = tracking_enabled(reader, portfolio_id)
+        finally:
+            reader.close()
+        if not enabled:
+            continue  # forward tracking starts only with an explicit --enable-tracking run
+        args = ["--db", str(db), "--portfolio-id", portfolio_id, "--max-fills", str(maximum),
+                "--confirm-live-read", "--confirm-local-import"]
+        for product in products:
+            args += ["--product", product]
+        print(f"snapshotting positions for {len(products)} products", flush=True)
+        result = positions_main(args) == 0
+        record_sync_status(db, portfolio_id, "positions", result)
+        ok = ok and result
+    return ok
 
 
 if __name__ == "__main__":

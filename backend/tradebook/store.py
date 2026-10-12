@@ -53,17 +53,27 @@ def initialize(db: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS reason_history (
           trade_id TEXT NOT NULL REFERENCES trades(id), revision INTEGER NOT NULL,
           reason TEXT, edited_at TEXT NOT NULL, PRIMARY KEY(trade_id, revision));
+        CREATE TABLE IF NOT EXISTS notes_history (
+          trade_id TEXT NOT NULL REFERENCES trades(id), revision INTEGER NOT NULL,
+          notes TEXT, edited_at TEXT NOT NULL, PRIMARY KEY(trade_id, revision));
         CREATE TABLE IF NOT EXISTS execution_economics (
           trade_id TEXT PRIMARY KEY REFERENCES trades(id),
           gross_execution_usd TEXT NOT NULL, net_after_fees_usd TEXT NOT NULL,
           entry_notional_usd TEXT NOT NULL, pnl_method TEXT NOT NULL);
         """)
         existing = {column[1] for column in db.execute("PRAGMA table_info(trades)")}
-        for column in ("basis_status", "basis_currency"):
+        for column in ("basis_status", "basis_currency", "notes"):
             if column not in existing:
                 db.execute(f"ALTER TABLE trades ADD COLUMN {column} TEXT")
         if "fee_currency_assumed" not in existing:
             db.execute("ALTER TABLE trades ADD COLUMN fee_currency_assumed INTEGER NOT NULL DEFAULT 0")
+
+        if "notes_revision" not in existing:
+            db.execute("ALTER TABLE trades ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0")
+        from .positions import initialize_positions
+        from .lifecycle_reasons import initialize_reasons
+        initialize_positions(db)
+        initialize_reasons(db)
 
 
 _UNSET_CURSOR = object()
@@ -223,6 +233,23 @@ def update_reason(db: sqlite3.Connection, trade_id: str, reason: str | None,
         db.execute("INSERT INTO reason_history VALUES (?, ?, ?, ?)",
             (trade_id, revision, reason, datetime.now(timezone.utc).isoformat()))
     return get_trade(db, trade_id)
+
+def update_notes(db: sqlite3.Connection, trade_id: str, notes: str | None,
+                 expected_revision: int) -> dict | None:
+    if notes is not None and len(notes) > 4000:
+        raise ValueError("notes too long")
+    with db:
+        changed = db.execute(
+            "UPDATE trades SET notes=?, notes_revision=notes_revision+1 "
+            "WHERE id=? AND notes_revision=?", (notes, trade_id, expected_revision))
+        if changed.rowcount == 0:
+            if get_trade(db, trade_id) is None:
+                return None
+            raise ValueError("revision conflict")
+        db.execute("INSERT INTO notes_history VALUES (?, ?, ?, ?)",
+                   (trade_id, expected_revision + 1, notes, datetime.now(timezone.utc).isoformat()))
+    return get_trade(db, trade_id)
+
 
 def backup(db: sqlite3.Connection, target: Path) -> None:
     with sqlite3.connect(target) as destination:
