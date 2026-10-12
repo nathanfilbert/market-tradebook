@@ -107,6 +107,8 @@ def test_closed_trade_shows_linked_reason_without_copying_it(tmp_path):
     assert trade["lifecycle"]["entry_reason"]["reason"] == "fade the pop"
     own = api.patch(f"/api/trades/{trade['id']}/reason", json={"reason": "own", "expected_revision": 0}).json()
     assert own["reason"] == "own"
+    listed = api.get("/api/lifecycles").json()["items"]
+    assert [(i["lifecycle_id"], i["linked_trade_ids"]) for i in listed] == [(LC_S, [trade["id"]])]
     detail = api.get(f"/api/lifecycles/{LC_S}").json()
     assert detail["entry_reason"]["reason"] == "fade the pop" and detail["linked_trade_ids"] == [trade["id"]]
 

@@ -121,7 +121,11 @@ def create_app(db_path: str | Path, checks=None, clock=lambda: datetime.now(time
         db = database()
         try:
             projection, scopes, reasons = lifecycle_view(db)
-            items = [lifecycle_item(lc, scopes, reasons) for lc in
+            linked = {}
+            for trade_id, link in sorted(projection.links.items()):
+                if "lifecycle_id" in link:
+                    linked.setdefault(link["lifecycle_id"], []).append(trade_id)
+            items = [{**lifecycle_item(lc, scopes, reasons), "linked_trade_ids": linked.get(lc.lifecycle_id, [])} for lc in
                      sorted(projection.lifecycles.values(), key=lambda lc: (lc.opened_at, lc.lifecycle_id), reverse=True)
                      if status is None or lc.status == status]
             return {"items": items, "scopes": list(scopes.values()),
