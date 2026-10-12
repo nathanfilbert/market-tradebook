@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, Inexact, InvalidOperation, localcontext
 import hashlib
 import json
 import sqlite3
@@ -32,8 +32,23 @@ def _decimal(value, *, positive: bool = False) -> Decimal:
     return amount
 
 
+def _share(amount: Decimal, part: Decimal, whole: Decimal) -> Decimal:
+    """Exact amount * part / whole; refuse rather than round."""
+    with localcontext() as context:
+        context.traps[Inexact] = True
+        try:
+            return amount * part / whole
+        except Inexact:
+            raise ValueError("partial entry cannot be allocated exactly") from None
+
+
 def calculate_execution(packet: ClosedTradePacket, orders: list[dict]) -> Execution:
-    """Use complete one-fill order values; never substitute margin or leverage."""
+    """Use complete one-fill order values; never substitute margin or leverage.
+
+    A close may use part of its entry fill (one entry filled 4, closed 2 + 2). The
+    entry order's value and fee are then allocated by closed/entry quantity, and only
+    when that share is exact. The exit fill and order must equal the close exactly.
+    """
     if (packet.product_type not in {"dated_future", "perpetual"} or packet.price_currency != "USD"
             or packet.entry_time is None or packet.entry_price is None or packet.exit_price is None
             or packet.fee_usd is None or not packet.fee_currency_assumed
@@ -41,6 +56,7 @@ def calculate_execution(packet: ClosedTradePacket, orders: list[dict]) -> Execut
         raise ValueError("CFM close lacks complete two-order execution evidence")
     entry_side = "BUY" if packet.position_side == "long" else "SELL"
     sides = (entry_side, "SELL" if entry_side == "BUY" else "BUY")
+    sizes: list[Decimal] = []
     values: list[Decimal] = []
     fees: list[Decimal] = []
     after_fees: list[Decimal] = []
@@ -58,8 +74,8 @@ def calculate_execution(packet: ClosedTradePacket, orders: list[dict]) -> Execut
                 or order.get("product_type") != "FUTURE" or order.get("side") != side
                 or order.get("status") != "FILLED" or order.get("number_of_fills") != "1"):
             raise ValueError("order identity, account, or fill completion mismatch")
-        if (_decimal(fill.get("size"), positive=True) != packet.closed_quantity
-                or _decimal(order.get("filled_size"), positive=True) != packet.closed_quantity
+        size = _decimal(fill.get("size"), positive=True)
+        if (_decimal(order.get("filled_size"), positive=True) != size
                 or _decimal(fill.get("price"), positive=True) != price
                 or _decimal(order.get("average_filled_price"), positive=True) != price):
             raise ValueError("order quantity or price mismatch")
@@ -68,15 +84,71 @@ def calculate_execution(packet: ClosedTradePacket, orders: list[dict]) -> Execut
         after = _decimal(order.get("total_value_after_fees"))
         if fee != _decimal(fill.get("commission")) or after != value + (fee if side == "BUY" else -fee):
             raise ValueError("order fee or after-fees value mismatch")
-        values.append(value); fees.append(fee); after_fees.append(after); ids.append(order_id)
-    if ids[0] == ids[1] or sum(fees) != packet.fee_usd:
+        sizes.append(size); values.append(value); fees.append(fee); after_fees.append(after); ids.append(order_id)
+    closed = packet.closed_quantity
+    # Exit must be wholly this close (no reversal or split exit); entry may be shared.
+    if sizes[1] != closed or not closed <= sizes[0]:
+        raise ValueError("order quantity or price mismatch")
+    if closed == sizes[0]:
+        entry_value, entry_fee = values[0], fees[0]
+    else:
+        entry_value, entry_fee = _share(values[0], closed, sizes[0]), _share(fees[0], closed, sizes[0])
+    entry_after = entry_value + (entry_fee if entry_side == "BUY" else -entry_fee)
+    if ids[0] == ids[1] or entry_fee + fees[1] != packet.fee_usd:
         raise ValueError("duplicate order or unallocated fees")
     # Both orders must imply the same USD value per price movement per contract.
-    if values[0] * packet.exit_price != values[1] * packet.entry_price:
+    if values[0] * sizes[1] * packet.exit_price != values[1] * sizes[0] * packet.entry_price:
         raise ValueError("order value cannot be reconciled to a constant contract size")
-    gross = values[1] - values[0] if packet.position_side == "long" else values[0] - values[1]
-    net = after_fees[1] - after_fees[0] if packet.position_side == "long" else after_fees[0] - after_fees[1]
-    return Execution(gross, net, values[0], (ids[0], ids[1]))
+    gross = values[1] - entry_value if packet.position_side == "long" else entry_value - values[1]
+    net = after_fees[1] - entry_after if packet.position_side == "long" else entry_after - after_fees[1]
+    return Execution(gross, net, entry_value, (ids[0], ids[1]))
+
+
+def check_entry_allocation(db: sqlite3.Connection, trade_id: str, packet: ClosedTradePacket,
+                           orders: list[dict], result: Execution) -> None:
+    """Refuse when saved closes sharing this entry fill would use more than that fill.
+
+    Checks every saved close of the market and account, enriched or not, so that two
+    partial closes can never each claim the whole entry. The exit fill must belong to
+    this close alone.
+    """
+    entry, exit_fill = packet.source_events
+    entry_size = _decimal(entry.payload.get("size"), positive=True)
+    entry_fee = _decimal(orders[0].get("total_fees"))
+    quantity = Decimal(0)
+    fees = Decimal(0)
+    notional = result.entry_notional_usd
+    found = False
+    rows = db.execute(
+        "SELECT t.id, t.packet_json, e.entry_notional_usd FROM trades t "
+        "LEFT JOIN execution_economics e ON e.trade_id=t.id WHERE t.account_id=? AND t.market=?",
+        (packet.account_id, packet.market)).fetchall()
+    for row in rows:
+        other = ClosedTradePacket.model_validate_json(row[1])
+        event_ids = [event.event_id for event in other.source_events]
+        if row[0] == trade_id:
+            if other != packet:
+                raise ValueError("saved trade does not match execution evidence")
+            found = True
+        elif exit_fill.event_id in event_ids:
+            raise ValueError("closing fill is shared with another close")
+        if entry.event_id not in event_ids:
+            continue
+        if (len(other.source_events) != 2 or other.source_events[0] != entry
+                or other.source_key != packet.source_key or other.position_side != packet.position_side
+                or other.entry_price != packet.entry_price or other.entry_time != packet.entry_time
+                or other.fee_usd is None):
+            raise ValueError("entry fill is used inconsistently")
+        other_exit = other.source_events[1].payload
+        quantity += other.closed_quantity
+        fees += other.fee_usd - _share(_decimal(other_exit.get("commission")), other.closed_quantity,
+                                       _decimal(other_exit.get("size"), positive=True))
+        if row[0] != trade_id and row[2] is not None:
+            notional += Decimal(row[2])
+    if (not found or quantity > entry_size or fees > entry_fee
+            or (quantity == entry_size and fees != entry_fee)
+            or notional > _decimal(orders[0].get("filled_value"), positive=True)):
+        raise ValueError("entry fill allocation exceeds its order")
 
 
 def persist_execution(db: sqlite3.Connection, trade_id: str, packet: ClosedTradePacket,
@@ -90,6 +162,8 @@ def persist_execution(db: sqlite3.Connection, trade_id: str, packet: ClosedTrade
         raise ValueError("saved trade does not match execution evidence")
     db.execute("SAVEPOINT order_execution")
     try:
+        # Recheck inside the write so a stale collection cannot oversubscribe an entry.
+        check_entry_allocation(db, trade_id, packet, orders, result)
         for order in orders:
             event_id = json.dumps(["orders", order["order_id"]], separators=(",", ":"))
             raw = canonical_json(order)
@@ -112,7 +186,7 @@ def persist_execution(db: sqlite3.Connection, trade_id: str, packet: ClosedTrade
         raise
 
 
-def _collect_execution(db, packet: ClosedTradePacket, http, cache: dict):
+def _collect_execution(db, trade_id: str, packet: ClosedTradePacket, http, cache: dict):
     """Read exact source order IDs and refuse conflicts with immutable saved evidence."""
     orders = []
     if len(packet.source_events) != 2:
@@ -134,7 +208,9 @@ def _collect_execution(db, packet: ClosedTradePacket, http, cache: dict):
         if old and old[0] != canonical_json(order):
             raise ValueError("Coinbase order evidence changed")
         orders.append(order)
-    return orders, calculate_execution(packet, orders)
+    result = calculate_execution(packet, orders)
+    check_entry_allocation(db, trade_id, packet, orders, result)
+    return orders, result
 
 
 def collect_saved_executions(db: sqlite3.Connection, markets: list[str], http):
@@ -152,7 +228,7 @@ def collect_saved_executions(db: sqlite3.Connection, markets: list[str], http):
             raise ValueError("selected market has no saved CFM closes")
         for row in rows:
             packet = ClosedTradePacket.model_validate_json(row["packet_json"])
-            orders, result = _collect_execution(db, packet, http, cache)
+            orders, result = _collect_execution(db, row["id"], packet, http, cache)
             collected.append((row["id"], packet, orders, result))
     return collected
 
@@ -162,7 +238,8 @@ def collect_pending_executions(db: sqlite3.Connection, markets: list[str], accou
     """Bounded automatic enrichment, isolating unavailable/mismatched closes.
 
     Already enriched rows need no new order reads. Source replay clears enrichment
-    when its packet changes. Partial allocations never use whole-order values.
+    when its packet changes. A close using part of its entry fill gets only its exact
+    share of the entry order; split or reversing exits stay unsupported.
     """
     if not account_id or not markets or len(set(markets)) != len(markets) or not 1 <= max_closes <= 1000:
         raise ValueError("explicit account, distinct markets and bounded closes required")
@@ -179,15 +256,15 @@ def collect_pending_executions(db: sqlite3.Connection, markets: list[str], accou
                 if (packet.price_currency != "USD" or packet.entry_time is None or packet.entry_price is None
                         or packet.exit_price is None or packet.fee_usd is None or not packet.fee_currency_assumed
                         or len(packet.source_events) != 2
-                        or any(_decimal(e.payload.get("size"), positive=True) != packet.closed_quantity
-                               for e in packet.source_events)):
+                        or _decimal(packet.source_events[1].payload.get("size"), positive=True) != packet.closed_quantity
+                        or _decimal(packet.source_events[0].payload.get("size"), positive=True) < packet.closed_quantity):
                     skipped += 1
                     continue
                 if attempted >= max_closes:
                     deferred += 1
                     continue
                 attempted += 1
-                orders, result = _collect_execution(db, packet, http, cache)
+                orders, result = _collect_execution(db, row["id"], packet, http, cache)
                 collected.append((row["id"], packet, orders, result))
             except Exception:
                 # Never expose dependency exception text, credentials or raw payloads.

@@ -194,9 +194,14 @@ configuration update. Reload the browser to see newly imported closes; the front
 does not poll the API automatically. After each successful CFM capture, recurring sync enriches eligible saved closes
 that do not already have order-based calculations. It reads their exact historical
 entry/exit orders and calculates entry exposure, execution gross P/L and net after
-trading fees. A close must cover complete one-fill entry and exit orders; partial
-allocations, missing inputs, wrong accounts, inconsistent amounts and changed order
-evidence never receive estimated values. Failed candidates remain unavailable and
+trading fees. A close must use complete one-fill entry and exit orders. When several
+closes share one entry fill (short 4, then cover 2 and 2), each close gets its exact
+share of the entry order's value and fee by closed/entry quantity; a share that is not
+exact is refused, not rounded. All saved closes of that entry, enriched or not, may not
+together use more than the entry, and the check repeats inside the write. Split or
+reversing exits, multi-fill orders, a closing fill shared by two closes, missing
+inputs, wrong accounts, inconsistent amounts and changed order evidence never receive
+estimated values. Failed candidates remain unavailable and
 mark the run failed while other verified candidates may still be saved. The run
 reports verified, unsupported, rejected/failed and deferred counts in the journal.
 

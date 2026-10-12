@@ -214,7 +214,12 @@ def test_pending_enrichment_isolates_bad_order_and_skips_partial_and_other_accou
     packet, orders = fixture()
     bad, bad_orders = second_fixture()
     bad_orders[0]['total_fees'] = '999'
-    partial = packet.model_copy(deep=True, update={'close_id': 'partial', 'closed_quantity': Decimal('0.5')})
+    # A split exit of its own fills; sharing the valid close's fills would be refused.
+    partial, _ = second_fixture()
+    for event in partial.source_events:
+        event.event_id = event.event_id.replace('-2', '-3')
+        event.payload['entry_id'] = event.event_id
+    partial = partial.model_copy(update={'close_id': 'partial', 'closed_quantity': Decimal('0.5')})
     foreign = packet.model_copy(deep=True, update={'close_id': 'foreign', 'account_id': 'another-account'})
     path = tmp_path / 'book.sqlite3'
     with connect(path) as db:
