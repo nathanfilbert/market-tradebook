@@ -22,12 +22,21 @@ def position(product=PRODUCT, side="SHORT", contracts="1", expiry=None):
     return item
 
 
+def future(product=PRODUCT, expiry="EXPIRING", managed="MANAGED_BY_FCM"):
+    return {"product_id": product, "product_type": "FUTURE", "quote_currency_id": "USD",
+            "future_product_details": {"contract_expiry_type": expiry, "risk_managed_by": managed}}
+
+
 class FakeCoinbase:
-    def __init__(self, positions=(), portfolio=ACCOUNT, can_view=True):
+    def __init__(self, positions=(), portfolio=ACCOUNT, can_view=True, products=None):
         self.positions, self.portfolio, self.can_view, self.calls = list(positions), portfolio, can_view, []
+        self.products = products
 
     def get(self, path, params=None):
         self.calls.append(path)
+        if path.startswith("/api/v3/brokerage/products/"):
+            product = path.rsplit("/", 1)[1]
+            return (self.products or {}).get(product, future(product))
         if path.endswith("key_permissions"):
             return {"can_view": self.can_view, "can_trade": False, "can_transfer": False,
                     "portfolio_uuid": self.portfolio}
@@ -44,11 +53,66 @@ def db(tmp_path):
     connection.close()
 
 
-def take(db, fills, *, at=T0, positions=(), enable=False, after=None, **kwargs):
+def take(db, fills, *, at=T0, positions=(), enable=False, after=None, selections=((SOURCE, PRODUCT),), **kwargs):
     reads = iter([list(fills), list(after if after is not None else fills)])
     clock = iter([at, at + timedelta(seconds=1)])
-    return capture(FakeCoinbase(positions, **kwargs), db, account_id=ACCOUNT, selections=[(SOURCE, PRODUCT)],
+    return capture(FakeCoinbase(positions, **kwargs), db, account_id=ACCOUNT, selections=list(selections),
                    clock=lambda: next(clock), enable=enable, read_fills=lambda products: next(reads))
+
+
+SPOT = {"product_id": "BTC-USD", "product_type": "SPOT", "quote_currency_id": "USD", "base_currency_id": "BTC"}
+
+
+def snapshot_rows(db):
+    return db.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
+
+
+@pytest.mark.parametrize("selection, products, why", [
+    # Spot mislabelled as CFM: refused before anything is read or saved.
+    ((SOURCE, "BTC-USD"), {"BTC-USD": SPOT}, "not a verified CFM product"),
+    # A perpetual listed under the dated-future source, and the reverse.
+    ((SOURCE, PRODUCT), {PRODUCT: future(expiry="PERPETUAL")}, "classifies it as perpetual"),
+    (("coinbase.cfm.us_perpetual", PRODUCT), None, "classifies it as dated_future"),
+    # Not FCM-managed, or metadata naming another product.
+    ((SOURCE, PRODUCT), {PRODUCT: future(managed="MANAGED_BY_OTHER")}, "not a verified CFM product"),
+    ((SOURCE, PRODUCT), {PRODUCT: future("OTHER-CDE")}, "classifies it as dated_future"),
+    (("coinbase.spot", "BTC-USD"), None, "CFM selections only")])
+def test_product_family_must_match_coinbase_metadata(db, selection, products, why):
+    spot_fill = fill("s", "BUY", 1, 1, product="BTC-USD")
+    with pytest.raises(ValueError, match=why):
+        take(db, [spot_fill], enable=True, selections=[selection], products=products)
+    assert snapshot_rows(db) == 0 and not tracking_enabled(db, ACCOUNT)
+    assert db.execute("SELECT COUNT(*) FROM source_events").fetchone()[0] == 0
+
+
+def test_duplicate_or_conflicting_selections_are_refused(db):
+    with pytest.raises(ValueError, match="more than once"):
+        take(db, [], enable=True, selections=[(SOURCE, PRODUCT), ("coinbase.cfm.us_perpetual", PRODUCT)])
+    assert snapshot_rows(db) == 0
+
+
+def test_fills_without_documented_contract_fields_are_refused(db):
+    bare = fill("a", "SELL", 1, 1)
+    del bare["sequence_timestamp"]
+    with pytest.raises(ValueError, match="documented fields"):
+        take(db, [bare], enable=True)
+    with pytest.raises(ValueError, match="documented fields"):
+        take(db, [fill("b", "SELL", 1, 1, size_in_quote=True)], enable=True)
+    assert snapshot_rows(db) == 0
+
+
+@pytest.mark.parametrize("stamp", ["2026-10-01T12:40:00", "not a time", "", None])
+def test_naive_or_malformed_fill_times_leave_the_scope_unresolved_without_crashing(db, stamp):
+    take(db, [], enable=True)
+    bad = fill("bad", "SELL", 1, 40)
+    bad["trade_time"] = stamp
+    db.execute("INSERT INTO source_events VALUES (?, ?, ?, ?)",
+               (SOURCE, ACCOUNT, json.dumps(["fills", "bad"], separators=(",", ":")), json.dumps(bad)))
+    take(db, [], at=T0 + timedelta(minutes=15))
+    checks, _, _ = load_checks(db, {(SOURCE, ACCOUNT, PRODUCT): [bad]})
+    assert len(checks) == 2
+    (scope,) = project(db, now=T0 + timedelta(minutes=16)).scopes
+    assert scope.status == "unresolved" and "unreadable fill time" in scope.reason and scope.lifecycles == ()
 
 
 def test_transport_allows_only_the_two_new_read_routes():

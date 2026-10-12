@@ -52,6 +52,9 @@ def detached(db, lifecycle_ids) -> list[dict]:
 
 def update_lifecycle_reason(db, lifecycle, reason: str | None, expected_revision: int) -> dict:
     """Compare-and-set on the revision; 0 means no reason has ever been saved."""
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError("reason must be text or null")
+    reason = (reason.strip() or None) if reason is not None else None   # blank is a deliberate clear
     if reason is not None and len(reason) > MAX_REASON:
         raise ValueError("reason too long")
     now = datetime.now(timezone.utc).isoformat()

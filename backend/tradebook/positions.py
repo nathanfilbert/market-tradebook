@@ -21,9 +21,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .coinbase_http import KEY_PERMISSIONS_ROUTE, POSITIONS_ROUTE
+from .coinbase_products import UnsupportedProduct, classify_product
+from .coinbase_source import _REQUIRED as REQUIRED_FILL_FIELDS
 from .lifecycles import DERIVATIVE_SOURCES, PositionCheck, ScopeProjection
 from .store import canonical_json, upsert_packets_and_events
 
+CFM_SOURCE_KEYS = {"perpetual": "coinbase.cfm.us_perpetual", "dated_future": "coinbase.cfm.dated_future"}
 MARGIN = timedelta(seconds=10)  # covers clock skew and fill visibility around the request
 
 
@@ -78,12 +81,15 @@ def capture(http, db: sqlite3.Connection, *, account_id: str, selections, max_fi
                                                                   max_records=max_fills)))
     sources = {}
     for source_key, product_id in selections:
-        if source_key not in DERIVATIVE_SOURCES or not product_id:
+        if source_key not in DERIVATIVE_SOURCES or not isinstance(product_id, str) or not product_id:
             raise ValueError("positions snapshots cover CFM selections only")
+        if product_id in sources:
+            raise ValueError(f"{product_id}: selected more than once")
         sources[product_id] = source_key
     products = sorted(sources)
     if not products:
         raise ValueError("no CFM products selected")
+    verify_cfm_products(http, sources)
     permissions = http.get(KEY_PERMISSIONS_ROUTE)
     if (not isinstance(permissions, dict) or permissions.get("can_view") is not True
             or permissions.get("portfolio_uuid") != account_id):
@@ -99,6 +105,9 @@ def capture(http, db: sqlite3.Connection, *, account_id: str, selections, max_fi
     for fill in after:
         if fill.get("retail_portfolio_id") != account_id or fill.get("product_id") not in sources:
             raise ValueError("fill outside the selected account or products")
+        missing = [name for name in REQUIRED_FILL_FIELDS if name not in fill]
+        if missing or fill.get("size_in_quote") is not False:
+            raise ValueError("fill is not a contract-sized CFM fill with the documented fields")
     raw = canonical_json(payload)
     digest = hashlib.sha256(raw.encode()).hexdigest()
     snapshot_id = hashlib.sha256(f"{account_id}|{requested.isoformat()}|{digest}".encode()).hexdigest()
@@ -126,6 +135,21 @@ def capture(http, db: sqlite3.Connection, *, account_id: str, selections, max_fi
         raise
     db.commit()
     return {"snapshot_id": snapshot_id, "fills_consistent": consistent, "tracking_enabled": enabled}
+
+
+def verify_cfm_products(http, sources: dict) -> None:
+    """Each selection's source family must match Coinbase's own product metadata (fail closed).
+
+    A selection labelled CFM that Coinbase classifies as spot, as the other CFM family, or not at all
+    is refused before anything is read or saved, so empty CFM positions never vouch for it."""
+    for product_id, source_key in sorted(sources.items()):
+        metadata = http.get("/api/v3/brokerage/products/" + quote(product_id, safe=""))
+        try:
+            spec = classify_product(metadata, account_family="CFM", source_reference="Coinbase Advanced Trade product GET")
+        except (UnsupportedProduct, ValueError) as exc:
+            raise ValueError(f"{product_id}: not a verified CFM product ({exc})") from None
+        if spec.product_id != product_id or CFM_SOURCE_KEYS.get(spec.product_type) != source_key:
+            raise ValueError(f"{product_id}: Coinbase classifies it as {spec.product_type}, not {source_key}")
 
 
 def _tables(db) -> set:
@@ -157,9 +181,12 @@ def load_checks(db, fills_by_scope: dict):
         stamps = []
         for fill in fills:
             try:
-                stamps.append(datetime.fromisoformat(str(fill.get("trade_time")).replace("Z", "+00:00")))
+                stamp = datetime.fromisoformat(str(fill.get("trade_time")).replace("Z", "+00:00"))
             except ValueError:
-                pass  # the replay itself reports unreadable fills
+                continue  # the replay reports the scope unresolved: "unreadable fill time"
+            if stamp.tzinfo is None or stamp.utcoffset() is None:
+                continue  # likewise for a time without a timezone; never compared with aware times
+            stamps.append(stamp)
         times[(source_key, account_id, product_id)] = stamps
     checks, expirations, latest = [], {}, {}
     rows = db.execute(

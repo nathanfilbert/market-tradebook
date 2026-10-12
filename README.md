@@ -228,7 +228,10 @@ current evidence only: history before tracking stays unattributed.
 `tradebook.positions` reads the full fills history, then
 `GET /api/v3/brokerage/cfm/positions`, then the fills again, after checking with
 `GET /api/v3/brokerage/key_permissions` that the existing view key belongs to the
-configured portfolio. Only these two read routes were added to the transport
+configured portfolio, and checking every selected product's own Coinbase metadata
+(`GET /api/v3/brokerage/products/{id}`): a product that Coinbase does not classify as
+the selected CFM family (spot, the other CFM family, not FCM-managed) is refused before
+anything is read or saved. Only the two new read routes were added to the transport
 allowlist. A snapshot counts only when both fills reads match, and for each product
 only when no fill lies within 10 seconds of the positions request. A flat snapshot
 starts or restarts a replay; a non-zero one must equal the replayed position.
@@ -256,8 +259,12 @@ unresolved too.
   fill is newer than the last snapshot, `stale` when fills or positions are over 15
   minutes old or the last read failed), every product's status, and detached reasons.
 - `GET /api/lifecycles/{id}`: fills with roles, linked closed trades and the entry reason.
+  `open_average_entry` is the average cost of the contracts still open (closes remove
+  their share at the running average); `lifetime_average_entry` averages every opening
+  fill. Both are calculated from fills, not Coinbase's own figure.
 - `PATCH /api/lifecycles/{id}/reason` with `expected_revision` (409 on conflict or for an
-  unresolved lifecycle). Clearing saves a new revision; `entry_reason.state` is `set`,
+  unresolved lifecycle). A null, empty or whitespace-only reason is a deliberate clear and
+saves a new revision (text is trimmed); `entry_reason.state` is `set`,
   `cleared` or `none` from the revision, not from the text.
 - Trades gain `lifecycle`: an exact link with the lifecycle's `entry_reason`, or
   `{"unresolved": why}`. Links need every fill of the close to map to one lifecycle, and

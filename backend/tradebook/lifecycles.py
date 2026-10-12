@@ -67,8 +67,19 @@ class Lifecycle:
     def public(self) -> dict:
         opening = [f for f in self.fills if f["role"] in OPENING_ROLES]
         opened_qty = sum((Decimal(f["quantity"]) for f in opening), Decimal(0))
-        entry = (sum((Decimal(f["quantity"]) * Decimal(f["price"]) for f in opening), Decimal(0)) / opened_qty
-                 if opened_qty else None)
+        lifetime = (sum((Decimal(f["quantity"]) * Decimal(f["price"]) for f in opening), Decimal(0)) / opened_qty
+                    if opened_qty else None)
+        # Average cost of what is still open: opens and adds add their cost, a close removes its share at the
+        # running average. Calculated from fills, not Coinbase's own figure.
+        held = cost = Decimal(0)
+        for f in self.fills:
+            quantity = Decimal(f["quantity"])
+            if f["role"] in OPENING_ROLES:
+                held, cost = held + quantity, cost + quantity * Decimal(f["price"])
+            elif held:
+                cost -= cost * quantity / held
+                held -= quantity
+        remaining = cost / held if held else None
         return {
             "lifecycle_id": self.lifecycle_id, "source_key": self.source_key,
             "account_id": self.account_id, "product_id": self.product_id, "side": self.side,
@@ -76,7 +87,8 @@ class Lifecycle:
             "opened_at": self.opened_at.isoformat(),
             "closed_at": self.closed_at.isoformat() if self.closed_at else None,
             "open_quantity": _text(self.open_quantity), "opened_quantity": _text(opened_qty),
-            "weighted_entry_price": _text(entry) if entry is not None else None,
+            "open_average_entry": _text(remaining) if remaining is not None else None,
+            "lifetime_average_entry": _text(lifetime) if lifetime is not None else None,
             "adds": sum(1 for f in self.fills if f["role"] == "add"),
             "closes": sum(1 for f in self.fills if f["role"] == "close"),
             "last_fill_entry_id": self.fills[-1]["entry_id"],

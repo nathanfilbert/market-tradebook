@@ -62,7 +62,24 @@ def test_adds_and_partial_closes_share_one_lifecycle():
     view = lc.public()
     assert [f["role"] for f in lc.fills] == ["open", "add", "close", "close"]
     assert (lc.status, view["open_quantity"], view["opened_quantity"]) == ("open", "1", "4")
-    assert view["weighted_entry_price"] == "115" and view["adds"] == 1 and view["closes"] == 2
+    assert view["open_average_entry"] == view["lifetime_average_entry"] == "115"
+    assert view["adds"] == 1 and view["closes"] == 2
+
+
+def test_open_average_entry_excludes_exposure_already_closed():
+    # Buy 2 at 100, sell 1, buy 1 at 200: the open 2 cost 100 + 200, so 150; lifetime entries average 133.33...
+    (lc,) = replay([fill("a", "BUY", 2, 1, price="100"), fill("b", "SELL", 1, 2, price="110"),
+                    fill("c", "BUY", 1, 3, price="200")]).lifecycles
+    view = lc.public()
+    assert (view["open_quantity"], view["opened_quantity"], view["open_average_entry"]) == ("2", "3", "150")
+    assert view["lifetime_average_entry"].startswith("133.333")
+    # A reversal's residual starts its own cost basis at the reversal price.
+    _, short = replay([fill("a", "BUY", 1, 1, price="100"), fill("r", "SELL", 3, 2, price="90")]).lifecycles
+    assert short.public()["open_average_entry"] == "90" and short.public()["open_quantity"] == "2"
+    # Partial close then add on a short: 3 at 50, cover 2, add 1 at 80 -> open 2 costing 50 + 80 = 65 each.
+    (s2,) = replay([fill("a", "SELL", 3, 1, price="50"), fill("b", "BUY", 2, 2, price="40"),
+                    fill("c", "SELL", 1, 3, price="80")]).lifecycles
+    assert (s2.public()["open_quantity"], s2.public()["open_average_entry"]) == ("2", "65")
 
 
 def test_reversal_is_split_exactly_with_fees_summing_to_the_fill():

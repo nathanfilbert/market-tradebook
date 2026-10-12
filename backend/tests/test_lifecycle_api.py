@@ -86,6 +86,35 @@ def test_entry_reason_revisions_conflicts_and_deliberate_clear(tmp_path):
         assert [r[0] for r in db.execute("SELECT revision FROM lifecycle_reason_history ORDER BY revision")] == [1, 2]
 
 
+def test_blank_reason_from_the_api_is_a_clear(tmp_path):
+    path = book(tmp_path, [fill("s", "SELL", 1, 40)])
+    api = client(path, 11)
+    url = f"/api/lifecycles/{LC_S}/reason"
+    first = api.patch(url, json={"reason": "", "expected_revision": 0}).json()["entry_reason"]
+    assert (first["state"], first["reason"], first["revision"]) == ("cleared", None, 1)
+    trimmed = api.patch(url, json={"reason": "  keep this  ", "expected_revision": 1}).json()["entry_reason"]
+    assert (trimmed["state"], trimmed["reason"]) == ("set", "keep this")
+    spaces = api.patch(url, json={"reason": " \n\t ", "expected_revision": 2}).json()["entry_reason"]
+    assert (spaces["state"], spaces["reason"], spaces["revision"]) == ("cleared", None, 3)
+    with connect(path) as db:
+        assert [r[0] for r in db.execute("SELECT reason FROM lifecycle_reason_history ORDER BY revision")] == [
+            None, "keep this", None]
+
+
+def test_api_survives_a_naive_fill_time(tmp_path):
+    path = book(tmp_path, [fill("s", "SELL", 1, 40)])
+    with connect(path) as db:
+        bad = fill("bad", "BUY", 1, 41)
+        bad["trade_time"] = "2026-10-01T12:41:00"
+        db.execute("INSERT INTO source_events VALUES (?, ?, ?, ?)",
+                   (SOURCE, ACCOUNT, json.dumps(["fills", "bad"], separators=(",", ":")), json.dumps(bad)))
+    snapshot(path, 15, [])
+    for route in ("/api/lifecycles", "/api/trades"):
+        assert client(path, 16).get(route).status_code == 200
+    (scope,) = client(path, 16).get("/api/lifecycles").json()["scopes"]
+    assert scope["status"] == "unresolved" and "unreadable fill time" in scope["reason"]
+
+
 def test_unresolved_lifecycle_takes_no_reason(tmp_path):
     path = book(tmp_path, [fill("s", "SELL", 1, 40)])
     snapshot(path, 15, [fill("s", "SELL", 1, 40)])  # Coinbase reports flat: disagreement
