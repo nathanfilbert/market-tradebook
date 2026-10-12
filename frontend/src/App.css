@@ -1,4 +1,4 @@
-/* Capture-and-review spreadsheet. Only the reason in the detail pane is editable. */
+/* Capture-and-review spreadsheet. Entry reason and notes in the detail pane are editable. */
 :root{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#182436;background:#f5f7fa}
 *{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}button{cursor:pointer}
 .shell{max-width:1700px;margin:0 auto;padding:32px clamp(16px,3vw,48px) 48px;min-width:0}
@@ -39,3 +39,5 @@ thead th:first-child{z-index:3;background:#f4f7fb}tbody tr:hover td:first-child{
 .detail-status{font-size:13px;color:#246e57;margin:12px 0 0}
 .primary-button:disabled{opacity:.6}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #de9c30;outline-offset:2px}
 @media(max-width:720px){.shell{padding:20px 16px 32px}.topbar{margin-bottom:22px}.source-badge{display:none}.pnl-summary{align-items:flex-start;flex-direction:column;gap:5px;margin-top:-10px}.toolbar{align-items:stretch;flex-direction:column;gap:15px}.filter{min-width:0}.table-meta{flex-direction:column;gap:4px}.below-sheet{align-items:start;flex-direction:column}.detail{border:0}}
+
+.detail .notes-label{margin-top:24px}

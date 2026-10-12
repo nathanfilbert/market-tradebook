@@ -14,6 +14,7 @@ export type Trade = {
   basis_status?: 'known_quote_basis' | 'unknown_transfer_basis' | 'cross_currency_unavailable' | null;
   basis_currency?: string | null;
   reason: string | null; reason_revision: number;
+  notes: string | null; notes_revision: number;
 }
 export type TradePage = { items: Trade[]; has_more: boolean }
 
@@ -28,4 +29,10 @@ export const saveReason = (id: string, reason: string | null, revision: number) 
   json<Trade>(`/api/trades/${encodeURIComponent(id)}/reason`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reason, expected_revision: revision }),
+  })
+
+export const saveNotes = (id: string, notes: string | null, revision: number) =>
+  json<Trade>(`/api/trades/${encodeURIComponent(id)}/notes`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ notes, expected_revision: revision }),
   })

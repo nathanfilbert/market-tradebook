@@ -17,3 +17,12 @@ it('reads a page and sends only reason plus revision', async () => {
   expect(calls[1][0]).toBe('/api/trades/t/reason')
   expect(JSON.parse(calls[1][1]?.body as string)).toEqual({ reason: 'why', expected_revision: 0 })
 })
+
+it('sends only notes and its revision', async () => {
+  const { saveNotes } = await import('./api')
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) })
+  vi.stubGlobal('fetch', fetch)
+  await saveNotes('trade/id', 'Review', 2)
+  expect(fetch.mock.calls[0][0]).toBe('/api/trades/trade%2Fid/notes')
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ notes: 'Review', expected_revision: 2 })
+})

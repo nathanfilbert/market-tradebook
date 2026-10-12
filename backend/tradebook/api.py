@@ -4,13 +4,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from .store import connect, initialize, get_trade, list_trades, update_reason
+from .store import connect, initialize, get_trade, list_trades, update_reason, update_notes
 from .sync import DEFAULT_DB
 
 
 class ReasonUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason: str | None = Field(max_length=4000)
+    expected_revision: int = Field(ge=0)
+
+
+class NotesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    notes: str | None = Field(max_length=4000)
     expected_revision: int = Field(ge=0)
 
 
@@ -57,6 +63,20 @@ def create_app(db_path: str | Path) -> FastAPI:
         try:
             try:
                 value = update_reason(db, trade_id, body.reason, body.expected_revision)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            if value is None:
+                raise HTTPException(404, "trade not found")
+            return public(value)
+        finally:
+            db.close()
+
+    @app.patch("/api/trades/{trade_id}/notes")
+    def notes(trade_id: str, body: NotesUpdate):
+        db = database()
+        try:
+            try:
+                value = update_notes(db, trade_id, body.notes, body.expected_revision)
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from exc
             if value is None:

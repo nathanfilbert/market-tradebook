@@ -73,3 +73,21 @@ def test_recent_trades_filter_excludes_older_closes_without_deleting_them(tmp_pa
     assert response["has_more"] is False
     assert len(client.get("/api/trades").json()["items"]) == 2
     assert client.get(f"/api/trades/{older_id}").status_code == 200
+
+
+def test_notes_are_manual_independent_and_validated(tmp_path):
+    client, trade_id = client_with_trade(tmp_path)
+    path = f'/api/trades/{trade_id}/notes'
+    client.patch(f'/api/trades/{trade_id}/reason', json={'reason': 'Thesis', 'expected_revision': 0})
+    saved = client.patch(path, json={'notes': 'Review\nMore patience', 'expected_revision': 0})
+    assert saved.status_code == 200
+    assert saved.json()['notes_revision'] == 1
+    assert saved.json()['reason'] == 'Thesis' and saved.json()['reason_revision'] == 1
+    assert client.get('/api/trades').json()['items'][0]['notes'] == 'Review\nMore patience'
+    assert client.patch(path, json={'notes': 'stale', 'expected_revision': 0}).status_code == 409
+    for extra in ('market', 'reason', 'gross_pnl_usd'):
+        assert client.patch(path, json={'notes': 'x', 'expected_revision': 1, extra: 'x'}).status_code == 422
+    assert client.patch(path, json={'notes': 'x' * 4001, 'expected_revision': 1}).status_code == 422
+    assert client.patch(path, json={'notes': 'x', 'expected_revision': -1}).status_code == 422
+    assert client.patch('/api/trades/missing/notes', json={'notes': 'x', 'expected_revision': 0}).status_code == 404
+    assert client.patch(path, json={'notes': '', 'expected_revision': 1}).json()['notes'] == ''

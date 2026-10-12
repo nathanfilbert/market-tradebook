@@ -2,7 +2,7 @@
 
 ## Agreed scope
 - Read-only Coinbase spot and CFM adapter components now exist for injected fill/product data, including conservative classification and close assembly; this does not constitute live connectivity or establish account/product coverage. The current sync CLI remains mock-only. See `docs/coinbase-source-contract.md` for the public field mapping and explicit unknowns. Additional sources remain a future extension point. The app **does not place trades**.
-- Trading fields are populated from Coinbase records or transparently derived from those records; **only `reason` is manually entered**. An unavailable source value stays unavailable, never invented.
+- Trading fields are populated from Coinbase records or transparently derived from those records; **only `reason` (Entry Reason) and `notes` (Notes) are manually entered in the UI**. An unavailable source value stays unavailable, never invented.
 - Show position size in fiat terms as well as in native units. Use a responsive frontend (React + TypeScript + Vite) and Python backend (FastAPI). These were accepted architectural directions; deployment and live account access are not thereby approved or verified.
 
 ## Candidate columns and provenance
@@ -23,8 +23,9 @@
 | `fees`, `fee_currency` | Coinbase / aggregated | Trading fees allocated to the record. Preserve source components and original denomination; no silent currency conversion. |
 | `funding_adjustment`, `funding_currency` | Coinbase if applicable | Signed carrying/funding cash flow, separate from fees. May not apply to spot or every futures product. |
 | `net_pnl`, `net_currency` | Coinbase if reported, otherwise derived | Net realized result with a documented calculation and cost scope. Flag conflicts between reported and computed figures; never silently replace source values. |
-| `reason` | **Manual only** | User's discretionary rationale, editable from the UI; may be blank until supplied. Example reasons in discussion were fictional, not imported facts. |
-| `synced_at`, `source_reference`, `revision` | System | Sync provenance, source lineage and reason/edit history. These are system metadata, not trading inputs. |
+| `reason` | **Manual only** | User's entry rationale (UI label: Entry Reason), editable from the UI; may be blank until supplied. Example reasons in discussion were fictional, not imported facts. |
+| `notes` | **Manual only** | Optional free-text review notes entered and edited in the UI; never populated by Coinbase imports. Separate from entry rationale. |
+| `synced_at`, `source_reference`, `revision` | System | Sync provenance, source lineage and reason/notes edit history. These are system metadata, not trading inputs. |
 
 Use exact decimals for financial amounts. Keep reported and derived figures distinguishable; retain raw source references and cost components. Distinct currencies should not be summed without an explicit, traceable conversion. Trade summaries can be rebuilt from immutable source events after grouping rules are chosen.
 
@@ -35,3 +36,6 @@ The current local app uses one realized full/partial close per row, entry USD no
 3. Which fee/funding/rebate/other cash flows count in net P/L, and how should currencies be converted and discrepancies handled? Do not infer a futures multiplier or fiat notional from an unverified unit.
    - For the two saved single-fill-pair CFM closes, matched Coinbase historical orders supply quote-USD `filled_value` and `total_value_after_fees`. The local view now distinguishes calculated execution gross/net-after-trading-fees from unavailable Coinbase-reported and fully settled net P/L; funding/settlement remain excluded. This does not resolve semantics for other futures, mixed currencies, partial fills or multi-entry closes.
 4. Deployment beyond localhost, authentication, sync cadence and live account verification remain open; code-level adapter tests do not constitute live import approval.
+
+## Manual annotations
+Entry Reason and Notes are optional text fields, each limited to 4,000 characters with independent revision history and conflict checks. Local backend endpoints persist UI edits; Coinbase APIs never supply these annotations. Existing rows start with blank notes. Source sync/replay and backups preserve both fields and their histories. Exchange-derived fields remain read-only.

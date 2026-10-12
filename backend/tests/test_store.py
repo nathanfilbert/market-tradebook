@@ -86,3 +86,36 @@ def test_incomplete_source_values_remain_null_after_persistence(tmp_path):
     assert row["position_notional_usd"] is None
     assert row["net_pnl_usd"] is None
     db.close()
+
+
+def test_notes_migration_replay_and_backup(tmp_path):
+    from tradebook.store import update_notes, backup
+    db = connect(tmp_path / 'book.sqlite3'); initialize(db)
+    p = ClosedTradePacket.model_validate(packet())
+    trade_id = upsert_packet(db, p)
+    update_reason(db, trade_id, 'Entry thesis', 0)
+    # Simulate an existing database created before notes were introduced.
+    db.execute('DROP TABLE notes_history')
+    db.execute('ALTER TABLE trades DROP COLUMN notes')
+    db.execute('ALTER TABLE trades DROP COLUMN notes_revision')
+    db.commit()
+    initialize(db); initialize(db)
+    before = get_trade(db, trade_id)
+    assert before['notes'] is None and before['notes_revision'] == 0
+    assert before['reason'] == 'Entry thesis' and before['reason_revision'] == 1
+    update_notes(db, trade_id, 'Review\nWait for confirmation next time.', 0)
+    with __import__('pytest').raises(ValueError, match='revision conflict'):
+        update_notes(db, trade_id, 'stale', 0)
+    upsert_packet(db, p)
+    after = get_trade(db, trade_id)
+    assert {k: v for k, v in after.items() if k not in {'notes', 'notes_revision'}} == {
+        k: v for k, v in before.items() if k not in {'notes', 'notes_revision'}}
+    assert after['notes_revision'] == 1
+    assert db.execute('SELECT count(*) FROM notes_history').fetchone()[0] == 1
+    backup(db, tmp_path / 'restored.sqlite3')
+    restored = connect(tmp_path / 'restored.sqlite3')
+    assert get_trade(restored, trade_id) == after
+    assert restored.execute('SELECT notes FROM notes_history').fetchone()[0] == after['notes']
+    update_notes(db, trade_id, None, 1)
+    assert get_trade(db, trade_id)['notes'] is None
+    restored.close(); db.close()
