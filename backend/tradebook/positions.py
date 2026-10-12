@@ -24,7 +24,7 @@ from .coinbase_http import KEY_PERMISSIONS_ROUTE, POSITIONS_ROUTE
 from .coinbase_products import UnsupportedProduct, classify_product
 from .coinbase_source import _REQUIRED as REQUIRED_FILL_FIELDS
 from .lifecycles import DERIVATIVE_SOURCES, PositionCheck, ScopeProjection
-from .store import canonical_json, upsert_packets_and_events
+from .store import canonical_json, connect, upsert_packets_and_events
 
 CFM_SOURCE_KEYS = {"perpetual": "coinbase.cfm.us_perpetual", "dated_future": "coinbase.cfm.dated_future"}
 MARGIN = timedelta(seconds=10)  # covers clock skew and fill visibility around the request
@@ -243,7 +243,9 @@ def main(argv=None) -> int:
         if not os.environ.get("COINBASE_API_KEY_NAME") or not os.environ.get("COINBASE_API_KEY_SECRET"):
             raise ValueError("Coinbase signer credentials are not configured")
         http = CoinbaseHTTP(authenticator=create_coinbase_authenticator())
-        db = sqlite3.connect(args.db.expanduser())
+        # The store's own connection: sqlite3.Row rows (staging compares saved fills by column name) and
+        # foreign keys on, exactly as the sync and API open it.
+        db = connect(args.db)
         try:
             result = capture(http, db, account_id=args.portfolio_id, selections=selections,
                              max_fills=args.max_fills, enable=args.enable_tracking)
