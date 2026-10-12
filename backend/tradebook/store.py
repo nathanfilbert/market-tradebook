@@ -64,6 +64,10 @@ def initialize(db: sqlite3.Connection) -> None:
                 db.execute(f"ALTER TABLE trades ADD COLUMN {column} TEXT")
         if "fee_currency_assumed" not in existing:
             db.execute("ALTER TABLE trades ADD COLUMN fee_currency_assumed INTEGER NOT NULL DEFAULT 0")
+        from .positions import initialize_positions
+        from .lifecycle_reasons import initialize_reasons
+        initialize_positions(db)
+        initialize_reasons(db)
 
 
 _UNSET_CURSOR = object()

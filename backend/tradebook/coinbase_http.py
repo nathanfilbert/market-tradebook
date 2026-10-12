@@ -10,7 +10,10 @@ from urllib.request import Request, urlopen
 BASE_URL = "https://api.coinbase.com"
 FILLS_ROUTE = "/api/v3/brokerage/orders/historical/fills"
 PORTFOLIOS_ROUTE = "/api/v3/brokerage/portfolios"
-_STATIC_ROUTES = frozenset({FILLS_ROUTE, "/api/v3/brokerage/products", PORTFOLIOS_ROUTE, "/v2/accounts"})
+POSITIONS_ROUTE = "/api/v3/brokerage/cfm/positions"
+KEY_PERMISSIONS_ROUTE = "/api/v3/brokerage/key_permissions"
+_STATIC_ROUTES = frozenset({FILLS_ROUTE, "/api/v3/brokerage/products", PORTFOLIOS_ROUTE, "/v2/accounts",
+                            POSITIONS_ROUTE, KEY_PERMISSIONS_ROUTE})
 _WALLET_TRANSACTIONS_PREFIX = "/v2/accounts/"
 
 

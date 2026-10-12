@@ -10,6 +10,10 @@ from pathlib import Path
 
 from .sync import DEFAULT_DB, SOURCE_TYPES, main as sync_main
 from .coinbase_order_sync import main as order_sync_main
+from .positions import main as positions_main, readonly, tracking_enabled
+
+CFM_SOURCE_KEYS = {"coinbase-cfm-perpetual": "coinbase.cfm.us_perpetual",
+                   "coinbase-cfm-dated-future": "coinbase.cfm.dated_future"}
 
 MAX_SOURCE_SELECTIONS = 32
 
@@ -128,7 +132,38 @@ def run_sources(db: Path, maximum: int, sources: list[dict], *, dry_run: bool) -
                                "--confirm-live-read", "--dry-run" if dry_run else "--confirm-local-import"]
             if order_sync_main(enrichment_args) != 0:
                 failed = True
+    if not dry_run and not snapshot_positions(db, maximum, sources):
+        failed = True
     return 2 if failed else 0
+
+
+def snapshot_positions(db: Path, maximum: int, sources: list[dict]) -> bool:
+    """After the fills pass, take one bracketed positions snapshot per tracked portfolio."""
+    portfolios = {}
+    for source in sources:
+        if source["source"] in CFM_SOURCE_KEYS:
+            portfolios.setdefault(source["portfolio_id"], []).append(
+                f"{CFM_SOURCE_KEYS[source['source']]}:{source['product_id']}")
+    ok = True
+    for portfolio_id, products in sorted(portfolios.items()):
+        if not db.is_file():
+            continue
+        reader = readonly(db)
+        try:
+            enabled = tracking_enabled(reader, portfolio_id)
+        finally:
+            reader.close()
+        if not enabled:
+            continue  # forward tracking starts only with an explicit --enable-tracking run
+        args = ["--db", str(db), "--portfolio-id", portfolio_id, "--max-fills", str(maximum),
+                "--confirm-live-read", "--confirm-local-import"]
+        for product in products:
+            args += ["--product", product]
+        print(f"snapshotting positions for {len(products)} products", flush=True)
+        result = positions_main(args) == 0
+        record_sync_status(db, portfolio_id, "positions", result)
+        ok = ok and result
+    return ok
 
 
 if __name__ == "__main__":

@@ -95,7 +95,7 @@ def test_history_starting_mid_position_is_ignored_until_the_flat_point():
     # A flat claim that contradicts the replayed position fails closed instead of guessing.
     contradicted = replay(fills, baselines=(baseline(0), baseline(3)))
     assert contradicted.lifecycles[0].status == "unresolved"
-    assert "contradicts" in contradicted.lifecycles[0].unresolved_reason
+    assert "fills replay to -1" in contradicted.lifecycles[0].unresolved_reason
 
 
 @pytest.mark.parametrize("bad", [

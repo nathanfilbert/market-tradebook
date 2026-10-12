@@ -215,24 +215,53 @@ Replace `--dry-run` with `--confirm-local-import` to persist verified candidates
 Without `--pending-only`, the manual command requires every selected close to
 validate and imports the selected batch atomically.
 
-## Position lifecycles (read only)
+## Position lifecycles and entry reasons
 
 `tradebook.lifecycles` replays saved CFM fills per exact source, account and product
 into position lifecycles: one position from a proven flat point back to flat. Adds and
 partial closes stay in one lifecycle; a reversal fill is split exactly, with its
-commission shared pro rata. Lifecycles are computed on read and never stored, so
-replays are identical and nothing in the database changes.
+commission shared pro rata. Lifecycles are computed on read and never stored.
 
-A replay starts only at evidence that the product was flat. A calculated return to
-zero from an unknown start is not that evidence, and no evidence source is wired up
-yet, so `GET /api/lifecycles` reports every product as `unavailable` and lists no open
-position. After a flat point, corrections and other non-fill events, account or field
-mismatches, a close with nothing open, or same-time fills in both directions mark the
-product `unresolved` until the next flat point.
+**Flat points come only from Coinbase positions snapshots taken after forward tracking
+is enabled.** A calculated return to zero is never a flat point, and a snapshot is
+current evidence only: history before tracking stays unattributed.
+`tradebook.positions` reads the full fills history, then
+`GET /api/v3/brokerage/cfm/positions`, then the fills again, after checking with
+`GET /api/v3/brokerage/key_permissions` that the existing view key belongs to the
+configured portfolio. Only these two read routes were added to the transport
+allowlist. A snapshot counts only when both fills reads match, and for each product
+only when no fill lies within 10 seconds of the positions request. A flat snapshot
+starts or restarts a replay; a non-zero one must equal the replayed position.
 
-- `GET /api/lifecycles?status=open|closed|unresolved`: lifecycles plus every product's
-  status, reason and freshness (`fresh` within 15 minutes of the last successful fills
-  read, otherwise `stale`, or `unavailable` when never recorded).
-- `GET /api/lifecycles/{id}`: fills with roles, and the closed trades linked to it.
-- Trades gain `lifecycle`: an exact link (every fill of the close maps to one
-  lifecycle) or `{"unresolved": why}`. Existing trade IDs, reasons and notes are unchanged.
+Enable tracking once per portfolio (writes the database; requires review first):
+
+```bash
+.venv/bin/python -m tradebook.positions --db ~/.local/share/market-tradebook/coinbase.sqlite3 \
+  --portfolio-id <portfolio> --product coinbase.cfm.dated_future:<PRODUCT> ... \
+  --confirm-live-read --confirm-local-import --enable-tracking
+```
+
+After that, each recurring run takes one snapshot per tracked portfolio after its fills
+pass. Until then nothing reads positions and every product reports `unavailable`.
+
+A product is `unresolved` until its next flat snapshot when a snapshot disagrees with
+the fills, a contract is past its expiry with a position open (settlement is not a
+fill), a non-FILL event appears (corrections, reversals and any other type), account or
+field data mismatch, a close has nothing open, or same-time fills go both ways. A
+position Coinbase reports in a product whose fills are not synced is listed as
+unresolved too.
+
+- `GET /api/lifecycles?status=open|closed|unresolved`: lifecycles with `display`
+  (`confirmed` when a fresh snapshot agrees after the last fill, `pending_check` when a
+  fill is newer than the last snapshot, `stale` when fills or positions are over 15
+  minutes old or the last read failed), every product's status, and detached reasons.
+- `GET /api/lifecycles/{id}`: fills with roles, linked closed trades and the entry reason.
+- `PATCH /api/lifecycles/{id}/reason` with `expected_revision` (409 on conflict or for an
+  unresolved lifecycle). Clearing saves a new revision; `entry_reason.state` is `set`,
+  `cleared` or `none` from the revision, not from the text.
+- Trades gain `lifecycle`: an exact link with the lifecycle's `entry_reason`, or
+  `{"unresolved": why}`. Links need every fill of the close to map to one lifecycle, and
+  linked closes together may not exceed the fills' closing or opening quantity. Trade
+  IDs, trade reasons and notes are never changed or copied.
+- A reason whose lifecycle stops appearing after a replay is kept and listed under
+  `detached_reasons`; it is never moved automatically.
