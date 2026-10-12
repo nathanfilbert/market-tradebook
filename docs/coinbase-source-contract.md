@@ -98,6 +98,19 @@ filled quantity, average price, single-fill completion, commission, after-fees
 arithmetic and consistent order-value scaling before publishing values. Partial
 allocations cannot receive whole-order exposure or P/L.
 
+Partial entry allocations (2026-10-12): a close whose exit fill and order equal the
+closed quantity may use part of a larger single-fill entry. The entry order's
+`filled_value`, `total_fees` and after-fees value are allocated by closed/entry
+quantity with exact decimal arithmetic; an inexact share is refused. Order values are
+reconciled per contract across the two quantities, and the allocated entry fee plus
+the exit fee must equal the saved close fee. Before collection and again inside the
+write, every saved close in the account and market that uses the same entry fill must
+carry identical entry evidence, and their total quantity, allocated entry fees and
+stored entry exposure may not exceed the entry order (fees must match exactly once
+the entry is fully closed). A closing fill used by more than one saved close refuses
+every affected close. Results keep `coinbase_orders_ex_funding`; funding and
+settlement stay unknown.
+
 Each pass attempts at most 100 candidate closes per product, reports unsupported,
 failed and deferred counts, and can save verified candidates even if another
 candidate fails. Already enriched rows require no fresh order requests; source
