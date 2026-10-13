@@ -52,31 +52,37 @@ def detached(db, lifecycle_ids) -> list[dict]:
 
 def update_lifecycle_reason(db, lifecycle, reason: str | None, expected_revision: int) -> dict:
     """Compare-and-set on the revision; 0 means no reason has ever been saved."""
+    initialize_reasons(db)
+    with db:
+        write_reason(db, lifecycle, reason, expected_revision)
+    return reasons_by_lifecycle(db)[lifecycle.lifecycle_id]
+
+
+def write_reason(db, lifecycle, reason, expected_revision: int) -> None:
+    """The compare-and-set write itself, inside the caller's open transaction: it never commits or begins
+    one, so a caller holding a write reservation keeps it. The tables must already exist."""
     if reason is not None and not isinstance(reason, str):
         raise ValueError("reason must be text or null")
     reason = (reason.strip() or None) if reason is not None else None   # blank is a deliberate clear
     if reason is not None and len(reason) > MAX_REASON:
         raise ValueError("reason too long")
     now = datetime.now(timezone.utc).isoformat()
-    initialize_reasons(db)
-    with db:
-        row = db.execute("SELECT revision FROM lifecycle_reasons WHERE lifecycle_id=?",
-                         (lifecycle.lifecycle_id,)).fetchone()
-        current = row[0] if row else 0
-        if current != expected_revision:
-            raise ValueError("revision conflict")
-        revision = current + 1
-        if row is None:
-            db.execute("INSERT OR IGNORE INTO lifecycle_reasons VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                       (lifecycle.lifecycle_id, lifecycle.source_key, lifecycle.account_id, lifecycle.product_id,
-                        lifecycle.side, lifecycle.opening_entry_id, lifecycle.opened_at.isoformat(),
-                        reason, revision, now))
-        else:
-            db.execute("UPDATE lifecycle_reasons SET reason=?, revision=?, updated_at=? "
-                       "WHERE lifecycle_id=? AND revision=?",
-                       (reason, revision, now, lifecycle.lifecycle_id, current))
-        if db.execute("SELECT changes()").fetchone()[0] != 1:
-            raise ValueError("revision conflict")  # another writer won the race
-        db.execute("INSERT INTO lifecycle_reason_history VALUES (?, ?, ?, ?)",
-                   (lifecycle.lifecycle_id, revision, reason, now))
-    return reasons_by_lifecycle(db)[lifecycle.lifecycle_id]
+    row = db.execute("SELECT revision FROM lifecycle_reasons WHERE lifecycle_id=?",
+                     (lifecycle.lifecycle_id,)).fetchone()
+    current = row[0] if row else 0
+    if current != expected_revision:
+        raise ValueError("revision conflict")
+    revision = current + 1
+    if row is None:
+        db.execute("INSERT OR IGNORE INTO lifecycle_reasons VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (lifecycle.lifecycle_id, lifecycle.source_key, lifecycle.account_id, lifecycle.product_id,
+                    lifecycle.side, lifecycle.opening_entry_id, lifecycle.opened_at.isoformat(),
+                    reason, revision, now))
+    else:
+        db.execute("UPDATE lifecycle_reasons SET reason=?, revision=?, updated_at=? "
+                   "WHERE lifecycle_id=? AND revision=?",
+                   (reason, revision, now, lifecycle.lifecycle_id, current))
+    if db.execute("SELECT changes()").fetchone()[0] != 1:
+        raise ValueError("revision conflict")  # another writer won the race
+    db.execute("INSERT INTO lifecycle_reason_history VALUES (?, ?, ?, ?)",
+               (lifecycle.lifecycle_id, revision, reason, now))

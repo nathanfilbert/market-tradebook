@@ -49,8 +49,11 @@ def test_reasons_notes_and_lifecycle_reasons_stay_separate(tmp_path):
     api.patch(f"/api/trades/{trade['id']}/reason", json={"reason": "own reason", "expected_revision": 0})
     before = rows(path, "SELECT reason, reason_revision, notes, notes_revision FROM trades")
     history = rows(path, "SELECT * FROM notes_history") + rows(path, "SELECT * FROM reason_history")
-    lc = api.patch(f"/api/lifecycles/{LC}/reason", json={"reason": "written while open", "expected_revision": 0}).json()
-    assert lc["entry_reason"]["reason"] == "written while open"
+    # The exit already has its own (legacy) reason, so the shared reason must name it as seen.
+    assert api.patch(f"/api/lifecycles/{LC}/reason", json={"reason": "x", "expected_revision": 0}).status_code == 409
+    lc = api.patch(f"/api/position-reasons/{LC}", json={"reason": "written while open", "expected_revision": 0,
+                                                        "legacy_seen": [{"trade_id": trade["id"], "reason_revision": 1}]}).json()
+    assert lc["reason"] == "written while open" and lc["kind"] == "lifecycle"
     assert rows(path, "SELECT reason, reason_revision, notes, notes_revision FROM trades") == before
     assert rows(path, "SELECT * FROM notes_history") + rows(path, "SELECT * FROM reason_history") == history
     api.patch(f"/api/trades/{trade['id']}/notes", json={"notes": "second", "expected_revision": 1})

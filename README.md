@@ -281,3 +281,26 @@ saves a new revision (text is trimmed); `entry_reason.state` is `set`,
   IDs, trade reasons and notes are never changed or copied.
 - A reason whose lifecycle stops appearing after a replay is kept and listed under
   `detached_reasons`; it is never moved automatically.
+
+## One entry reason per position
+
+Separate exit rows of one position share a single entry reason; each exit keeps its own
+exit reason, notes and history (`tradebook.position_reasons`).
+
+- A row joins a group only on saved fill evidence. Forward-tracked rows use their exact
+  lifecycle link. Earlier (pre-tracking) partial closes group when they cite the same single
+  saved entry fill in the same source, account and exact product, their copies of both
+  fills equal the saved fills, each exit fill belongs to one close, and together they use
+  no more than the entry fill. One row closing its whole entry fill stays an ordinary row.
+  A row that fails a proof is reported `unresolved` and keeps its own reason. Nothing groups
+  by coin, side, size or time, no flat start is assumed and no open position is claimed.
+- The shared reason is stored like an open-trade reason (`lifecycle_reasons` and its
+  history) under the group ID: `GET /api/position-reasons`, and
+  `PATCH /api/position-reasons/{group}` with `expected_revision`. Trades gain
+  `position_reason` with `state` set, cleared, legacy, conflict or none.
+- Each row's earlier `reason` is a legacy value and is never changed here. Before the first
+  save a group shows them: one value as `legacy`, different values as `conflict`. The first
+  save must send `legacy_seen` naming exactly the legacy (trade, revision) pairs shown, or it
+  is refused (409). A blank save is a clear: a revision that overrides legacy values.
+- `PATCH /api/trades/{id}/exit-reason` saves one row's exit reason with its own revision and
+  `exit_reason_history`. Startup adds the two columns and the history table only.

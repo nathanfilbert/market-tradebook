@@ -4,11 +4,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from .lifecycle_reasons import annotation, detached, reasons_by_lifecycle, update_lifecycle_reason
+from .lifecycle_reasons import annotation, detached, reasons_by_lifecycle
 from .lifecycles import project
 from .positions import latest_snapshots
 from .recurring_sync import read_sync_status
-from .store import connect, initialize, get_trade, list_trades, update_reason, update_notes
+from .position_reasons import all_groups, save as save_position_reason, save_lifecycle, views_by_trade
+from .store import connect, initialize, get_trade, list_trades, update_exit_reason, update_reason, update_notes
 from .sync import DEFAULT_DB
 
 # Open state is only as fresh as the last completed reads (timer runs every ~5 minutes).
@@ -25,6 +26,26 @@ class NotesUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     notes: str | None = Field(max_length=4000)
     expected_revision: int = Field(ge=0)
+
+
+class ExitReasonUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    exit_reason: str | None = Field(max_length=4000)
+    expected_revision: int = Field(ge=0)
+
+
+class LegacySeen(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trade_id: str
+    reason_revision: int = Field(ge=0)
+
+
+class PositionReasonUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str | None = Field(max_length=4000)
+    expected_revision: int = Field(ge=0)
+    # The first save of a group with legacy row reasons names exactly the ones shown (see position_reasons.save).
+    legacy_seen: list[LegacySeen] = Field(default_factory=list, max_length=200)
 
 
 def public(row: dict) -> dict:
@@ -83,11 +104,18 @@ def create_app(db_path: str | Path, checks=None, clock=lambda: datetime.now(time
                 "positions": scope["positions"], "display": display_state(lc, scope),
                 "entry_reason": annotation(reasons.get(lc.lifecycle_id))}
 
-    def with_lifecycle(row: dict, projection, reasons) -> dict:
+    def with_lifecycle(row: dict, projection, reasons, positions=None) -> dict:
         link = projection.links.get(row["id"])
         if link and "lifecycle_id" in link:
             link = {**link, "entry_reason": annotation(reasons.get(link["lifecycle_id"]))}
-        return {**public(row), "lifecycle": link}
+        return {**public(row), "lifecycle": link, "position_reason": (positions or {}).get(row["id"])}
+
+    def detached_now(db, projection):
+        groups, _, _ = all_groups(db, projection)
+        return detached(db, set(projection.lifecycles) | set(groups))
+
+    def projector(db):
+        return project(db, checks, now=clock())
 
     def database():
         db = connect(path); initialize(db)
@@ -105,8 +133,8 @@ def create_app(db_path: str | Path, checks=None, clock=lambda: datetime.now(time
             since = datetime.now(timezone.utc) - timedelta(days=30) if recent else None
             rows = list_trades(db, limit + 1, offset, since=since)
             projection = project(db, checks, now=clock())
-            reasons = reasons_by_lifecycle(db)
-            return {"items": [with_lifecycle(r, projection, reasons) for r in rows[:limit]],
+            reasons, positions = reasons_by_lifecycle(db), views_by_trade(db, projection)
+            return {"items": [with_lifecycle(r, projection, reasons, positions) for r in rows[:limit]],
                     "has_more": len(rows) > limit}
         finally:
             db.close()
@@ -118,7 +146,8 @@ def create_app(db_path: str | Path, checks=None, clock=lambda: datetime.now(time
             value = get_trade(db, trade_id)
             if value is None:
                 raise HTTPException(404, "trade not found")
-            return with_lifecycle(value, project(db, checks, now=clock()), reasons_by_lifecycle(db))
+            projection = project(db, checks, now=clock())
+            return with_lifecycle(value, projection, reasons_by_lifecycle(db), views_by_trade(db, projection))
         finally:
             db.close()
 
@@ -135,7 +164,7 @@ def create_app(db_path: str | Path, checks=None, clock=lambda: datetime.now(time
                      sorted(projection.lifecycles.values(), key=lambda lc: (lc.opened_at, lc.lifecycle_id), reverse=True)
                      if status is None or lc.status == status]
             return {"items": items, "scopes": list(scopes.values()),
-                    "detached_reasons": detached(db, projection.lifecycles)}
+                    "detached_reasons": detached_now(db, projection)}
         finally:
             db.close()
 
@@ -157,17 +186,52 @@ def create_app(db_path: str | Path, checks=None, clock=lambda: datetime.now(time
     def lifecycle_reason(lifecycle_id: str, body: ReasonUpdate):
         db = database()
         try:
-            projection, scopes, _ = lifecycle_view(db)
-            lc = projection.lifecycles.get(lifecycle_id)
-            if lc is None:
-                raise HTTPException(404, "lifecycle not found")
-            if lc.status == "unresolved":
-                raise HTTPException(409, "lifecycle cannot be attributed: " + (lc.unresolved_reason or "unresolved"))
             try:
-                update_lifecycle_reason(db, lc, body.reason, body.expected_revision)
+                save_lifecycle(db, projector, lifecycle_id, body.reason, body.expected_revision)
+            except LookupError as exc:
+                raise HTTPException(404, str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from exc
-            return lifecycle_item(lc, scopes, reasons_by_lifecycle(db))
+            projection, scopes, reasons = lifecycle_view(db)
+            return lifecycle_item(projection.lifecycles[lifecycle_id], scopes, reasons)
+        finally:
+            db.close()
+
+    @app.get("/api/position-reasons")
+    def position_reasons():
+        """The shared entry reason of every grouped exit row, by trade ID, and reasons now detached."""
+        db = database()
+        try:
+            projection = project(db, checks, now=clock())
+            return {"by_trade": views_by_trade(db, projection), "detached_reasons": detached_now(db, projection)}
+        finally:
+            db.close()
+
+    @app.patch("/api/position-reasons/{group_id}")
+    def position_reason(group_id: str, body: PositionReasonUpdate):
+        db = database()
+        try:
+            try:
+                return save_position_reason(db, projector, group_id, body.reason, body.expected_revision,
+                                            [item.model_dump() for item in body.legacy_seen])
+            except LookupError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        finally:
+            db.close()
+
+    @app.patch("/api/trades/{trade_id}/exit-reason")
+    def exit_reason(trade_id: str, body: ExitReasonUpdate):
+        db = database()
+        try:
+            try:
+                value = update_exit_reason(db, trade_id, body.exit_reason, body.expected_revision)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            if value is None:
+                raise HTTPException(404, "trade not found")
+            return public(value)
         finally:
             db.close()
 
