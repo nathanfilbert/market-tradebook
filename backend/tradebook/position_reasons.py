@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from uuid import NAMESPACE_URL, uuid5
 
-from .lifecycle_reasons import annotation, reasons_by_lifecycle, update_lifecycle_reason
+from .lifecycle_reasons import annotation, initialize_reasons, reasons_by_lifecycle, write_reason
 from .lifecycles import DERIVATIVE_SOURCES
 from .store import canonical_json
 
@@ -56,6 +57,11 @@ def _decimal(value) -> Decimal | None:
     except (InvalidOperation, ValueError, TypeError):
         return None
     return result if result.is_finite() else None
+
+
+def _positive(value) -> Decimal | None:
+    result = _decimal(value)
+    return result if result is not None and result > 0 else None
 
 
 def _time(value) -> datetime | None:
@@ -99,7 +105,7 @@ def legacy_groups(db, skip=frozenset()):
     `skip` holds trade IDs already in a lifecycle group."""
     fills = _persisted_fills(db)
     rows = db.execute("SELECT id, source_key, account_id, market, position_side, entry_time, entry_price, "
-                      "close_time, closed_quantity, packet_json FROM trades ORDER BY close_time, id").fetchall()
+                      "close_time, closed_quantity, packet_json, exit_price FROM trades ORDER BY close_time, id").fetchall()
     cited = defaultdict(list)          # (source, account, fill id) -> [(trade id, position)]
     parsed = {}
     for row in rows:
@@ -116,7 +122,7 @@ def legacy_groups(db, skip=frozenset()):
     failed = defaultdict(list)         # same key -> [(trade id, why)]
     for row in rows:
         (trade_id, source_key, account_id, market, side, entry_time, entry_price,
-         close_time, closed_quantity, packet_json) = row
+         close_time, closed_quantity, packet_json, exit_price) = row
         ids = parsed[trade_id]
         if source_key not in DERIVATIVE_SOURCES or trade_id in skip or len(ids) != 2:
             continue                   # unknown-episode closes have no single entry allocation
@@ -126,11 +132,21 @@ def legacy_groups(db, skip=frozenset()):
         exit_raw = fills.get((source_key, account_id, exit_id))
         entry = json.loads(entry_raw) if entry_raw else {}
         exit_fill = json.loads(exit_raw) if exit_raw else {}
-        events = json.loads(packet_json)["source_events"]
-        size, closed = _decimal(entry.get("size")), _decimal(closed_quantity)
+        packet = json.loads(packet_json)
+        events = packet["source_events"]
+        size, closed = _positive(entry.get("size")), _positive(closed_quantity)
+        exit_size, exit_px = _positive(exit_fill.get("size")), _positive(exit_fill.get("price"))
+        entry_px = _positive(entry.get("price"))
+        entry_at, exit_at = _time(entry.get("trade_time")), _time(exit_fill.get("trade_time"))
         why = None
         if not entry_raw or not exit_raw:
             why = "an entry or exit fill of this close is not saved"
+        elif (packet.get("market") != market or packet.get("position_side") != side
+              or _decimal(packet.get("closed_quantity")) != _decimal(closed_quantity)
+              or _decimal(packet.get("entry_price")) != _decimal(entry_price)
+              or _decimal(packet.get("exit_price")) != _decimal(exit_price)
+              or _time(packet.get("entry_time")) != _time(entry_time) or _time(packet.get("close_time")) != _time(close_time)):
+            why = "the trade row and its own close evidence disagree"
         elif not (_same_fill(events[0].get("payload"), entry_raw) and _same_fill(events[1].get("payload"), exit_raw)):
             why = "the close cites fill data that differs from the saved fill"
         elif (entry.get("trade_type") != "FILL" or exit_fill.get("trade_type") != "FILL"
@@ -141,11 +157,17 @@ def legacy_groups(db, skip=frozenset()):
         elif ({"long": "BUY", "short": "SELL"}.get(side) != entry.get("side")
               or exit_fill.get("side") != {"BUY": "SELL", "SELL": "BUY"}.get(entry.get("side"))):
             why = "fill directions do not match the close"
-        elif (_time(entry.get("trade_time")) is None or _time(entry.get("trade_time")) != _time(entry_time)
-              or _decimal(entry.get("price")) is None or _decimal(entry.get("price")) != _decimal(entry_price)
-              or _time(exit_fill.get("trade_time")) is None or _time(exit_fill.get("trade_time")) != _time(close_time)):
+        elif None in (size, closed, exit_size, exit_px, entry_px, entry_at, exit_at):
+            why = "a fill or the close has a missing, non-positive or unreadable size, price or time"
+        elif (entry_at != _time(entry_time) or entry_px != _decimal(entry_price)
+              or exit_at != _time(close_time) or exit_px != _decimal(exit_price)):
             why = "entry or exit time or price does not match the saved fills"
-        elif size is None or size <= 0 or closed is None or closed <= 0 or closed > size:
+        elif not entry_at < exit_at:
+            why = "the exit fill is not after the entry fill"
+        elif closed != exit_size:
+            # The exit fill must be wholly this close; split or reversing exits are not proven allocations.
+            why = "closed quantity is not exactly the exit fill's size"
+        elif closed > size:
             why = "closed quantity does not fit the entry fill"
         elif any(p != 0 or n != 2 for _, p, n in cited[(source_key, account_id, entry_id)]):
             why = "the entry fill is also cited another way by a different close"
@@ -243,17 +265,64 @@ def views_by_trade(db, projection) -> dict:
     return out
 
 
-def save(db, projection, group_id: str, reason, expected_revision: int, legacy_seen) -> dict:
-    """Save the shared reason. The first save of a group with legacy values must name exactly the
-    legacy (trade, revision) pairs the person was shown, so a legacy edit in between is a conflict."""
-    groups, _, _ = all_groups(db, projection)
-    group = groups.get(group_id)
-    if group is None:
-        raise LookupError("position group not found")
-    if expected_revision == 0:
-        current = {(r["trade_id"], r["reason_revision"]) for r in _legacy(db, group) if r["reason"] is not None}
-        seen = {(item["trade_id"], item["reason_revision"]) for item in (legacy_seen or [])}
-        if current != seen:
-            raise ValueError("legacy reasons changed or were not reviewed; reload and choose again")
-    update_lifecycle_reason(db, group, reason, expected_revision)
+@contextmanager
+def reserved(db):
+    """Hold SQLite's write reservation from the first read to the commit, so group membership, the legacy
+    per-exit revisions and the shared reason are checked and written as one state. Another writer (a legacy
+    reason edit, a sync, another shared save) waits or fails; it cannot slip in between."""
+    if db.in_transaction:
+        raise RuntimeError("a transaction is already open on this connection")
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    db.execute("COMMIT")
+
+
+class Unattributable(ValueError):
+    """The lifecycle exists but cannot take a reason."""
+
+
+def _check_legacy(db, group: Group, expected_revision: int, legacy_seen) -> None:
+    if expected_revision != 0:
+        return
+    current = {(r["trade_id"], r["reason_revision"]) for r in _legacy(db, group) if r["reason"] is not None}
+    seen = {(item["trade_id"], item["reason_revision"]) for item in (legacy_seen or [])}
+    if current != seen:
+        raise ValueError("legacy reasons changed or were not reviewed; reload and choose again")
+
+
+def save(db, projector, group_id: str, reason, expected_revision: int, legacy_seen) -> dict:
+    """Save the shared reason. Membership, the legacy check and the write happen under one reservation.
+    The first save of a group with legacy values must name exactly the legacy (trade, revision) pairs
+    the person was shown, so a legacy edit in between is a conflict. `projector(db)` recomputes lifecycles."""
+    initialize_reasons(db)                   # its executescript commits, so it runs before the reservation
+    with reserved(db):
+        groups, _, _ = all_groups(db, projector(db))
+        group = groups.get(group_id)
+        if group is None:
+            raise LookupError("position group not found")
+        _check_legacy(db, group, expected_revision, legacy_seen)
+        write_reason(db, group, reason, expected_revision)
     return view(db, group, reasons_by_lifecycle(db).get(group_id))
+
+
+def save_lifecycle(db, projector, lifecycle_id: str, reason, expected_revision: int):
+    """The open-trade route's save, under the same reservation. Its first save is refused when the
+    lifecycle's exits already carry their own reasons (those are resolved through `save`)."""
+    initialize_reasons(db)
+    with reserved(db):
+        projection = projector(db)
+        lc = projection.lifecycles.get(lifecycle_id)
+        if lc is None:
+            raise LookupError("lifecycle not found")
+        if lc.status == "unresolved":
+            raise Unattributable("lifecycle cannot be attributed: " + (lc.unresolved_reason or "unresolved"))
+        group = lifecycle_groups(projection).get(lifecycle_id)
+        if expected_revision == 0 and group and any(r["reason"] is not None for r in _legacy(db, group)):
+            raise Unattributable("this position's exits already have their own reasons; "
+                                 "choose the position reason in the Tradebook")
+        write_reason(db, lc, reason, expected_revision)
+    return projection, lc

@@ -4,11 +4,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from .lifecycle_reasons import annotation, detached, reasons_by_lifecycle, update_lifecycle_reason
+from .lifecycle_reasons import annotation, detached, reasons_by_lifecycle
 from .lifecycles import project
 from .positions import latest_snapshots
 from .recurring_sync import read_sync_status
-from .position_reasons import all_groups, save as save_position_reason, views_by_trade
+from .position_reasons import all_groups, save as save_position_reason, save_lifecycle, views_by_trade
 from .store import connect, initialize, get_trade, list_trades, update_exit_reason, update_reason, update_notes
 from .sync import DEFAULT_DB
 
@@ -114,6 +114,9 @@ def create_app(db_path: str | Path, checks=None, clock=lambda: datetime.now(time
         groups, _, _ = all_groups(db, projection)
         return detached(db, set(projection.lifecycles) | set(groups))
 
+    def projector(db):
+        return project(db, checks, now=clock())
+
     def database():
         db = connect(path); initialize(db)
         return db
@@ -183,23 +186,14 @@ def create_app(db_path: str | Path, checks=None, clock=lambda: datetime.now(time
     def lifecycle_reason(lifecycle_id: str, body: ReasonUpdate):
         db = database()
         try:
-            projection, scopes, _ = lifecycle_view(db)
-            lc = projection.lifecycles.get(lifecycle_id)
-            if lc is None:
-                raise HTTPException(404, "lifecycle not found")
-            if lc.status == "unresolved":
-                raise HTTPException(409, "lifecycle cannot be attributed: " + (lc.unresolved_reason or "unresolved"))
-            positions = views_by_trade(db, projection)
-            exits = [t for t, link in projection.links.items() if link.get("lifecycle_id") == lifecycle_id]
-            if body.expected_revision == 0 and any(
-                    row["reason"] is not None for t in exits for row in positions.get(t, {}).get("legacy", [])):
-                raise HTTPException(409, "this position's exits already have their own reasons; "
-                                         "choose the position reason in the Tradebook")
             try:
-                update_lifecycle_reason(db, lc, body.reason, body.expected_revision)
+                save_lifecycle(db, projector, lifecycle_id, body.reason, body.expected_revision)
+            except LookupError as exc:
+                raise HTTPException(404, str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from exc
-            return lifecycle_item(lc, scopes, reasons_by_lifecycle(db))
+            projection, scopes, reasons = lifecycle_view(db)
+            return lifecycle_item(projection.lifecycles[lifecycle_id], scopes, reasons)
         finally:
             db.close()
 
@@ -217,9 +211,8 @@ def create_app(db_path: str | Path, checks=None, clock=lambda: datetime.now(time
     def position_reason(group_id: str, body: PositionReasonUpdate):
         db = database()
         try:
-            projection = project(db, checks, now=clock())
             try:
-                return save_position_reason(db, projection, group_id, body.reason, body.expected_revision,
+                return save_position_reason(db, projector, group_id, body.reason, body.expected_revision,
                                             [item.model_dump() for item in body.legacy_seen])
             except LookupError as exc:
                 raise HTTPException(404, str(exc)) from exc
